@@ -7,7 +7,7 @@
 - **原始问题**：一个完整的操作系统都有哪些模块？
 - **整理日期**：2026-11-06。
 - **内容来源**：本次对话中的操作系统模块说明，整理为项目文档；未进行外部规范逐条核验。
-- **当前状态**：Cargo/Rust 源码工程，源码版本 v0.1.3，运行时虚拟根为 `.env` 中的 `D:/os`。2026-11-07 已纠正构建与运行边界：Cargo 在项目 `target` 构建，Rust 程序启动后才初始化虚拟根；系统默认目录布局与根标记已集中到 `src/config.rs`。`cargo test --offline` 25 passed、0 failed；`cargo build --offline` 和 `cargo run --offline` 通过。独立内核、驱动、用户态隔离与裸机启动链路未实现；Ubuntu / Linux 原生运行尚未实测。
+- **当前状态**：Cargo/Rust 源码工程，源码版本 v0.1.3，运行时虚拟根为 `.env` 中的 `D:/os`。Cargo 在项目 `target` 构建，Rust 程序启动后才初始化虚拟根；系统默认目录布局与根标记集中在 `src/config.rs`。2026-11-07 完成五个模块：文件读写、命令解析器、任务表、用户账户、系统日志，共二十个命令。`cargo test --offline` 54 passed、0 failed；`cargo build --offline` 通过；全新虚拟根真实进程端到端验收通过。独立内核、驱动、用户态隔离与裸机启动链路未实现；Ubuntu / Linux 原生运行尚未实测。
 - **权威入口**：本文件负责项目说明、实际实现状态与文档索引；详细通用模块说明以 [完整操作系统模块总览](docs/operating-system-modules.md) 为唯一权威正文。后续新增实现或文档时，应同步更新入口与状态，不将设计设想写成已实现功能。
 - **范围说明**：本文描述通用操作系统的模块概览，不表示 ElaraOS 必须一次性实现所有模块。文末开发顺序是建议，不是已经确认或完成的里程碑。
 
@@ -15,6 +15,7 @@
 
 - [完整操作系统模块总览](docs/operating-system-modules.md)：25 个主题章节，展开层次、子模块职责、依赖关系、四条典型协作路径与完整性边界，另附术语、官方核验入口和修订记录。
 - [初始化后命令与模块开发对照](docs/ubuntu-style-commands.md)：按 Ubuntu 常见命令组织当前八命令的实际用法、未支持语法、待实现命令与模块映射；其他会话先读当前能力与验收记录，再结合模块总览选择一个开发增量。
+- [设计原则：无垃圾与流畅](docs/design-principles.md)：七条跨模块约束——系统目录只读、可写目录有所有者和生命周期、临时文件不留用户目录、应用自包含、任务 QoS 类别、配置是文件且变更是事务、不提供清理工具。**实现任何写入、任务或资源相关功能前必须先读**；文中标注了当前源码与原则不符的两处。
 - [模块总览 HTML 阅读视图](docs/operating-system-modules.html)：读取同目录 Markdown 正文，不另行维护第二份正文；直接从本地文件打开时可能受浏览器读取限制，本地阅读优先使用 Markdown。
 
 阅读索引：
@@ -51,9 +52,13 @@ Cargo 在项目 `target` 目录构建；程序启动后读取 `.env`，再初始
 - [src/main.rs](src/main.rs)：读取配置、调用 Rust 初始化、进入命令行。
 - [src/config.rs](src/config.rs)：集中配置。`ROOTFS_DEFAULTS` 保存系统默认目录布局、根标记文件名及内容；`Config` 严格解析 `.env`，没有缺省数据根或静默回退。
 - [src/initialization.rs](src/initialization.rs)：新数据根创建、已授权目录补全、重复初始化校验；结果以枚举表达。
-- [src/filesystem.rs](src/filesystem.rs)：数据根验证、受限路径、目录验证与只读列举。
+- [src/filesystem.rs](src/filesystem.rs)：数据根验证、受限路径、目录验证、只读列举，以及文件创建/读取/写入/追加/删除后端。
 - [src/virtual_path.rs](src/virtual_path.rs)：虚拟命名空间内路径归一化与根上越界拒绝，Shell 与文件访问后端共用。
-- [src/shell.rs](src/shell.rs)：`help/info/pwd/cd/ls/echo/clear/exit`，维护虚拟当前目录。
+- [src/command_line.rs](src/command_line.rs)：命令行解析，支持引号与反斜杠转义，拒绝管道、重定向、通配符等未实现语法。
+- [src/tasks.rs](src/tasks.rs)：程序内部任务表，`sleep` 后台任务、状态与等待；与宿主进程无关。
+- [src/users.rs](src/users.rs)：`/etc/passwd` 账户表，`root` 为唯一管理员；账户与宿主账户无关。
+- [src/logging.rs](src/logging.rs)：`/var/log/elara.log` 系统日志，记录启动与每条命令。
+- [src/shell.rs](src/shell.rs)：二十个命令的分发，维护虚拟当前目录与当前用户。
 - [src/test_support.rs](src/test_support.rs)：测试夹具，仅在测试构建中编译，数据放在项目 `target/test-data`。
 - [.env](.env)：机器相关运行配置，目前只有虚拟根位置。
 
@@ -92,7 +97,7 @@ Rust 初始化允许创建新目录或接管空目录；拒绝接管无项目标
 
 - **历史已验证**：v0.1.2 的 Windows 检查、8 个数据根/配置测试、命令行实际运行及中文输入通过。
 - **此前已核验**：五个外部脚本已撤回，Rust 初始化中自动写 Cargo 配置的逻辑已撤回。
-- **2026-11-07 已验证**：`cargo test --offline` 25 passed、0 failed；`cargo build --offline` 通过；对照实验显示虚拟根不存在时构建仍成功，运行后由 Rust 创建 24 个目录；配置迁入 `src/config.rs` 并删除旧 txt 后再次 25 passed；`target/debug/elara-host.exe` 以默认 `.env` 启动，`pwd/cd/ls/exit` 实际运行通过。
+- **2026-11-07 已验证**：五模块完成后 `cargo test --offline` 54 passed、0 failed；`cargo build --offline` 通过；以全新空目录作为虚拟根运行 `target/debug/elara-host.exe`，25 行输入覆盖二十个命令的关键路径，退出码 0，虚拟根外无写入，`ps` 不含宿主进程。细节见[命令账本 §8.1](docs/ubuntu-style-commands.md#81-五模块验收2026-11-07当前有效)。
 - **未验证**：真实交互 TTY 与 Ubuntu / Linux 原生运行未执行。
 
 ## 1. 完整操作系统的边界
@@ -353,4 +358,6 @@ Rust 可以用于内核、驱动和用户态组件。裸机内核通常使用 `#
 | 2026-11-06 | 将仅演示 exe 的阶段更新为完整 Cargo 源码工程，当前目标调整为 Windows/Linux 宿主命令行原型 v0.1.2；新增严格数据根校验、只读目录列举与启动脚本。Windows 检查、8 个测试及真实启动交互通过；Linux 原生运行未实测。 |
 | 2026-11-07 | 按用户确认撤回自动写项目 Cargo 配置的 Rust 函数及调用，删除五个外部脚本，保留纯 Rust 初始化；源版本为 v0.1.3。旧 .cargo/config.toml 删除及最新编译测试被自动权限机制阻拦，状态标为未完成，不沿用历史通过结论。 |
 | 2026-11-07 | 纠正构建边界：删除把构建产物指向虚拟根的项目 Cargo 配置（备份于 target/repair-backups），测试夹具改到项目 target/test-data；按用户确认清理空目录、旧 exe 与过期测试数据；系统默认目录布局和根标记迁入 src/config.rs，删除顶层 txt。`cargo test` 25 passed，`cargo build`/`cargo run` 通过。 |
+| 2026-11-07 | 按用户确认依次完成五个模块：文件读写层、命令解析器、任务模块、`/etc` 用户模块、`/var/log` 日志模块；新增 `command_line.rs`、`tasks.rs`、`users.rs`、`logging.rs`。命令数从八个增至二十个。`cargo test` 54 passed；全新虚拟根真实进程验收通过。 |
 | 2026-11-07 | 新增初始化后命令账本并与模块总览互链；核对期间源码接入 cd 与虚拟当前目录，就地修正为八命令。当前源码经 rustc 编译、Windows 4 会话 / 54 行输入验收通过，保留旧权限阻塞历史与当前 Cargo 配置失败，不修改源码或配置，不声称 Linux 原生或单元测试全套通过。 |
+| 2026-11-07 | 新增设计原则文档（无垃圾与流畅）并接入 README 与命令账本的选模块流程；核对源码后记录 P1 系统目录可写、P3 暂存文件与目标同目录两处与原则不符，列出按优先级排序的六项改造。本轮只写文档，未改源码。 |
