@@ -1,0 +1,176 @@
+<title>操作系统模块图谱</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* 技术文档：左侧章节索引，右侧连续正文；模块职责表优先于装饰。 */
+:root {
+  --bg: #f5f7fa; --surface: #ffffff; --fg: #202d3d; --muted: #596b80; --line: #d6dfea; --accent: #205b91;
+  --font-display: "Georgia", "Noto Serif CJK SC", "SimSun", serif;
+  --font-body: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-code: "Cascadia Code", "Consolas", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg: #121923; --surface: #1b2532; --fg: #e1e8f1; --muted: #b0bfd0; --line: #34485f; --accent: #90bfee; color-scheme: dark; }
+}
+:root[data-theme="dark"] { --bg: #121923; --surface: #1b2532; --fg: #e1e8f1; --muted: #b0bfd0; --line: #34485f; --accent: #90bfee; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 16px; line-height: 1.85; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 32px 64px; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere; }
+a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+header, .layout, footer { max-width: 1160px; margin-inline: auto; }
+header { padding-block: 12px 28px; border-bottom: 1px solid var(--line); }
+.eyebrow { color: var(--muted); font-size: .8rem; letter-spacing: .06em; }
+h1 { font-family: var(--font-display); font-size: clamp(1.9rem, 4.5vw, 2.7rem); line-height: 1.3; margin: 12px 0 18px; text-wrap: balance; }
+header p { max-width: 68ch; margin: 8px 0; }
+.metadata { color: var(--muted); font-size: .85rem; }
+.actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 20px; }
+button { font: inherit; font-size: .9rem; background: var(--surface); color: var(--accent); border: 1px solid var(--line); padding: 7px 15px; border-radius: 4px; cursor: pointer; }
+button:disabled { cursor: default; color: var(--muted); }
+#status { color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 38px; padding-block: 30px; align-items: start; }
+aside, main { min-width: 0; }
+aside { position: sticky; top: calc(16px + env(safe-area-inset-top, 0px)); max-height: calc(100dvh - 48px - env(safe-area-inset-top, 0px)); overflow-y: auto; font-size: .84rem; }
+summary { cursor: pointer; color: var(--muted); font-weight: 600; padding-block: 4px 12px; }
+#toc { display: flex; flex-direction: column; gap: 7px; padding-block: 6px; }
+#toc a { text-decoration: none; line-height: 1.6; padding: 3px 0; }
+#toc a:hover { text-decoration: underline; }
+main { background: var(--surface); padding: clamp(18px, 3vw, 34px); border: 1px solid var(--line); border-radius: 4px; }
+main p, main li { overflow-wrap: anywhere; }
+main p { margin-block: 14px; }
+main h2 { font-size: 1.4rem; line-height: 1.5; margin: 42px 0 18px; padding-top: 14px; border-top: 1px solid var(--line); text-wrap: balance; scroll-margin-top: 24px; }
+main h2:first-of-type { margin-top: 8px; border-top: 0; }
+main h3 { font-size: 1.06rem; margin: 28px 0 12px; line-height: 1.5; text-wrap: balance; }
+main ul, main ol { padding-left: 1.5em; }
+main li { padding-block: 3px; }
+main blockquote { margin: 18px 0; padding: 6px 16px; border-left: 2px solid var(--line); color: var(--muted); }
+.table-scroll { width: 100%; overflow-x: auto; margin-block: 18px; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; line-height: 1.75; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: 10px 12px; overflow-wrap: anywhere; }
+th { background: var(--bg); font-weight: 600; }
+td:first-child { width: 26%; }
+pre { max-width: 100%; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); padding: 16px; font-family: var(--font-code); font-size: .82rem; line-height: 1.9; tab-size: 2; }
+code { font-family: var(--font-code); font-size: .9em; }
+pre code { font-size: inherit; }
+footer { color: var(--muted); font-size: .85rem; border-top: 1px solid var(--line); padding-top: 18px; }
+#copy-fallback { width: 100%; height: 150px; margin-top: 16px; color: var(--fg); background: var(--surface); border: 1px solid var(--line); font: .85rem var(--font-code); }
+@media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr); gap: 18px; } aside { position: static; max-height: none; } #toc { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; } }
+@media (max-width: 480px) { body { padding-block: 18px 36px; } #toc { grid-template-columns: minmax(0, 1fr); } th, td { padding: 8px; } table { font-size: .84rem; } td:first-child { width: 30%; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
+</style>
+<header>
+  <div class="eyebrow">通用操作系统 · 架构参考 · 2026-11-06</div>
+  <h1>操作系统模块图谱</h1>
+  <p>完整操作系统由受保护的内核、用户态基础系统和可安装维护的系统产品组成。本文逐层展开模块职责，并用程序启动、文件读取、缺页和网络收包四条路径连接它们。</p>
+  <p class="metadata">范围：现代通用 OS，可按目标裁剪。本文是架构说明，不是项目实现清单，也未逐条核验外部规范。</p>
+  <div class="actions">
+    <button id="copy-document" type="button" disabled>复制 Markdown 正文</button>
+    <span id="status" role="status" aria-live="polite">正在读取随页面发布的权威正文…</span>
+  </div>
+  <textarea id="copy-fallback" aria-label="可手动复制的 Markdown 正文" readonly hidden></textarea>
+</header>
+<div class="layout">
+  <aside aria-label="章节索引">
+    <details id="toc-box" open>
+      <summary>章节索引</summary>
+      <nav id="toc">
+        <a href="#document-start">正文与文档信息</a>
+      </nav>
+    </details>
+  </aside>
+  <main id="document-start" aria-busy="true">
+    <section id="loading-summary">
+      <h2>阅读提要</h2>
+      <p><strong>内核管理资源与执行，用户态组织服务与程序运行，产品层提供安装、更新和恢复。</strong></p>
+      <p>正文包括系统边界、L0–L7 概念层次、启动、架构、中断、并发、任务、内存、接口、IPC、驱动、存储、文件系统、网络、安全、虚拟化、电源、服务、界面、维护和验证体系。</p>
+      <p>“完整”由目标用途和可验证的系统契约定义。服务器无需桌面，嵌入式系统也不必实现通用桌面 OS 的全部能力。</p>
+      <p id="load-message">正文加载后，这里显示全部模块表与典型协作路径。</p>
+    </section>
+  </main>
+</div>
+<footer>权威正文：<code>docs/operating-system-modules.md</code>。页面只读该文件；发布链接携带发布时的快照，本地修改需重新发布才会反映到该链接。</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script>
+(() => {
+  const main = document.getElementById("document-start");
+  const status = document.getElementById("status");
+  const copy = document.getElementById("copy-document");
+  const fallback = document.getElementById("copy-fallback");
+  const toc = document.getElementById("toc");
+  let source = "";
+  if (window.matchMedia("(max-width: 860px)").matches) document.getElementById("toc-box").open = false;
+  const slug = text => text.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s+/g, "-");
+  fetch("operating-system-modules.md").then(response => {
+    if (!response.ok) throw new Error("正文读取失败，状态码 " + response.status);
+    return response.text();
+  }).then(text => {
+    source = text;
+    if (!window.marked) throw new Error("Markdown 渲染组件未加载");
+    main.innerHTML = window.marked.parse(text, { gfm: true, breaks: false });
+    const duplicateTitle = main.querySelector("h1");
+    if (duplicateTitle) duplicateTitle.remove();
+    const used = new Map();
+    const fragment = document.createDocumentFragment();
+    main.querySelectorAll("h2, h3").forEach(heading => {
+      const base = slug(heading.textContent);
+      const count = used.get(base) || 0;
+      used.set(base, count + 1);
+      heading.id = count ? base + "-" + count : base;
+      if (heading.tagName === "H2") {
+        const link = document.createElement("a");
+        link.href = "#" + heading.id;
+        link.textContent = heading.textContent;
+        fragment.appendChild(link);
+      }
+    });
+    toc.replaceChildren(fragment);
+    main.querySelectorAll("table").forEach(table => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "table-scroll";
+      table.replaceWith(wrapper);
+      wrapper.appendChild(table);
+    });
+    main.querySelectorAll("a").forEach(link => {
+      const href = link.getAttribute("href") || "";
+      if (href === "../README.md") {
+        const label = document.createElement("span");
+        label.textContent = link.textContent + "（本地项目入口）";
+        link.replaceWith(label);
+      } else if (/^https:\/\//.test(href)) {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+    });
+    main.setAttribute("aria-busy", "false");
+    copy.disabled = false;
+    status.textContent = "正文已加载，可复制为 Markdown；目录可定位各章节。";
+    if (location.hash) {
+      let id;
+      try { id = decodeURIComponent(location.hash.slice(1)); } catch (_) { id = location.hash.slice(1); }
+      const target = document.getElementById(id);
+      if (target) target.scrollIntoView();
+    }
+  }).catch(error => {
+    main.setAttribute("aria-busy", "false");
+    status.textContent = error.message;
+    document.getElementById("load-message").textContent = location.protocol === "file:"
+      ? "浏览器限制本地文件读取。请直接阅读同目录 operating-system-modules.md，或打开已发布的页面链接。"
+      : "正文未能加载，请刷新页面重试；本地 Markdown 文件仍是权威正文。";
+  });
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(source);
+      status.textContent = "Markdown 正文已复制。";
+      fallback.hidden = true;
+    } catch (_) {
+      fallback.value = source;
+      fallback.hidden = false;
+      fallback.focus();
+      fallback.select();
+      status.textContent = "此环境未允许自动复制。正文已选中，请手动复制。";
+    }
+  });
+})();
+</script>

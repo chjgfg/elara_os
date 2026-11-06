@@ -1,0 +1,11 @@
+# 构建产物
+/target
+
+# 本机运行时配置：ELARA_DATA_ROOT 指向本机绝对路径，每台机器自行建立
+/.env
+
+# Claude Code 本机权限设置
+/.claude/
+
+# 会话工作账本，不属于项目正式文档
+/docs/task_plan.md
