@@ -7,15 +7,18 @@
 - **原始问题**：一个完整的操作系统都有哪些模块？
 - **整理日期**：2026-11-06。
 - **内容来源**：本次对话中的操作系统模块说明，整理为项目文档；未进行外部规范逐条核验。
-- **当前状态**：Cargo/Rust 源码工程，源码版本 v0.1.3，运行时虚拟根为 `.env` 中的 `D:/os`。Cargo 在项目 `target` 构建，Rust 程序启动后才初始化虚拟根；系统默认目录布局与根标记集中在 `src/config.rs`。2026-11-07 完成五个模块：文件读写、命令解析器、任务表、用户账户、系统日志，共二十个命令。`cargo test --offline` 54 passed、0 failed；`cargo build --offline` 通过；全新虚拟根真实进程端到端验收通过。独立内核、驱动、用户态隔离与裸机启动链路未实现；Ubuntu / Linux 原生运行尚未实测。
+- **当前状态**：Cargo/Rust宿主命令行原型v0.1.3，运行时数据根由`.env`的`ELARA_DATA_ROOT`指定，构建在项目`target`。共同提示符/脚本入口、嵌套sh/source、常用语言限定子集、文件桥及FD已接通；M5支持适用内建的真正并发流式管道、显式有界回退及`& / jobs / bg / fg / wait %ID / kill`合作式作业。常用命令清单34项，额外内建/别名见[命令账本](docs/ubuntu-style-commands.md)。后台使用真实共享模块与实际Account；退出/EOF/身份切换取消并join旧作业，关闭旧FD保代际。密码使用固定版本rpassword原生Rust接口，隐藏失败不回退可见输入。最新稳定全量**169+145+6=320通过**，**严格Clippy仍有并行FS三处lint未过**，详见[脚本验收](docs/shell-scripting.md#8-验收记录)。不是独立内核或OS级安全沙箱，Ubuntu/Linux原生未测。
 - **权威入口**：本文件负责项目说明、实际实现状态与文档索引；详细通用模块说明以 [完整操作系统模块总览](docs/operating-system-modules.md) 为唯一权威正文。后续新增实现或文档时，应同步更新入口与状态，不将设计设想写成已实现功能。
 - **范围说明**：本文描述通用操作系统的模块概览，不表示 ElaraOS 必须一次性实现所有模块。文末开发顺序是建议，不是已经确认或完成的里程碑。
 
 详细文档：
 
 - [完整操作系统模块总览](docs/operating-system-modules.md)：25 个主题章节，展开层次、子模块职责、依赖关系、四条典型协作路径与完整性边界，另附术语、官方核验入口和修订记录。
-- [初始化后命令与模块开发对照](docs/ubuntu-style-commands.md)：按 Ubuntu 常见命令组织当前八命令的实际用法、未支持语法、待实现命令与模块映射；其他会话先读当前能力与验收记录，再结合模块总览选择一个开发增量。
-- [设计原则：无垃圾与流畅](docs/design-principles.md)：七条跨模块约束——系统目录只读、可写目录有所有者和生命周期、临时文件不留用户目录、应用自包含、任务 QoS 类别、配置是文件且变更是事务、不提供清理工具。**实现任何写入、任务或资源相关功能前必须先读**；文中标注了当前源码与原则不符的两处。
+- [初始化后命令与模块开发对照](docs/ubuntu-style-commands.md)：按 Ubuntu 常见命令组织当前支持命令的实际用法、未支持语法、待实现命令与模块映射；其他会话先读当前能力与验收记录，再结合模块总览选择一个开发增量。
+- [文件系统实现与验收](docs/filesystem.md)：写入分类、能力边界、对象/句柄、原子提交与恢复；mv/cp/stat/find/du命令桥、受管日志V2限额轮转及对象归属增量。具体FS交付以该账本为准，不把Shell验收当作完整临时生命周期或自有磁盘层完成。
+- [文件句柄命令](docs/file-descriptors.md)：`fd open/read/write/seek/stat/dup/sync/close` 等薄适配，SLOT:GEN 仅当前会话有效；共享脚本表、身份切换关闭能力、实际写入进度与 tests/ 验收。
+- [Shell 脚本](docs/shell-scripting.md)：共同词法/AST/求值、常用语法、嵌套调用、并发流式阶段与typed fallback、作用域合作式作业、资源/身份边界及真实程序验收；FS能力只复用接口。
+- [设计原则：无垃圾与流畅](docs/design-principles.md)：七条跨模块约束——系统目录只读、可写目录有所有者和生命周期、临时文件不留用户目录、应用自包含、任务 QoS 类别、配置是文件且变更是事务、不提供清理工具。**实现任何写入、任务或资源相关功能前必须先读**；已实现约束与待落实设计分开标注，不将目录分类视为完整生命周期管理。
 - [模块总览 HTML 阅读视图](docs/operating-system-modules.html)：读取同目录 Markdown 正文，不另行维护第二份正文；直接从本地文件打开时可能受浏览器读取限制，本地阅读优先使用 Markdown。
 
 阅读索引：
@@ -49,16 +52,36 @@ Cargo 在项目 `target` 目录构建；程序启动后读取 `.env`，再初始
 ### 源码与配置入口
 
 - [Cargo.toml](Cargo.toml)：Rust 工程与版本。
-- [src/main.rs](src/main.rs)：读取配置、调用 Rust 初始化、进入命令行。
+- [src/lib.rs](src/lib.rs)：真实程序与 `tests/` 共用的模块库入口，测试不复制业务实现。
+- [src/main.rs](src/main.rs)：读取配置、调用模块库中的 Rust 初始化、进入命令行。
 - [src/config.rs](src/config.rs)：集中配置。`ROOTFS_DEFAULTS` 保存系统默认目录布局、根标记文件名及内容；`Config` 严格解析 `.env`，没有缺省数据根或静默回退。
 - [src/initialization.rs](src/initialization.rs)：新数据根创建、已授权目录补全、重复初始化校验；结果以枚举表达。
 - [src/filesystem.rs](src/filesystem.rs)：数据根验证、受限路径、目录验证、只读列举，以及文件创建/读取/写入/追加/删除后端。
 - [src/virtual_path.rs](src/virtual_path.rs)：虚拟命名空间内路径归一化与根上越界拒绝，Shell 与文件访问后端共用。
-- [src/command_line.rs](src/command_line.rs)：命令行解析，支持引号与反斜杠转义，拒绝管道、重定向、通配符等未实现语法。
+- [src/command_line.rs](src/command_line.rs)：旧独立单行分词器，保留纯函数测试；不再参与普通提示符分发，实际前端为 `src/script/interactive.rs`。
+- [src/script/mod.rs](src/script/mod.rs)：选项与脚本入口；lexer/parser/runtime分离，常用语法、嵌套、显式流式/缓冲策略。
+- [src/script/pipe.rs](src/script/pipe.rs)、[src/script/streaming.rs](src/script/streaming.rs)、[src/script/control.rs](src/script/control.rs)、[src/script/jobs.rs](src/script/jobs.rs)：有界背压、并发阶段、合作式ACK/取消、作用域join；不是宿主信号或内核调度。
+- [src/script/shared.rs](src/script/shared.rs)、[tests/script/jobs.rs](tests/script/jobs.rs)、[tests/script/streaming.rs](tests/script/streaming.rs)、[tests/script/pipe.rs](tests/script/pipe.rs)：真实资源共享及逐功能验收，降级原因与实际消费可观察。
+- [src/script/fd.rs](src/script/fd.rs)：FD 会话所有者与参数/权限薄适配，IO 和句柄业务由文件系统实现。
+- [tests/script/fd.rs](tests/script/fd.rs)、[tests/fd_cli.rs](tests/fd_cli.rs)：模式/IO/代际/权限/报告功能测试与动态读取 token 的真实进程验收。
+- [tests/script_language.rs](tests/script_language.rs)：按词法、语法、运行/模块、Shell 接入分组加载 `tests/script/`，全部调用实际模块库接口。
+- [tests/script_cli.rs](tests/script_cli.rs)：真实程序运行脚本文件、语法检查、source 持久状态与错误恢复的验收，不使用当前 `.env` 指向的数据根。
 - [src/tasks.rs](src/tasks.rs)：程序内部任务表，`sleep` 后台任务、状态与等待；与宿主进程无关。
-- [src/users.rs](src/users.rs)：`/etc/passwd` 账户表，`root` 为唯一管理员；账户与宿主账户无关。
-- [src/logging.rs](src/logging.rs)：`/var/log/elara.log` 系统日志，记录启动与每条命令。
-- [src/shell.rs](src/shell.rs)：二十个命令的分发，维护虚拟当前目录与当前用户。
+- [src/users.rs](src/users.rs)：`/etc/passwd` 账户表与 `/etc/shadow` 加盐 SHA-256 密码；`root` 为唯一管理员；账户与宿主账户无关。
+- [src/permissions.rs](src/permissions.rs)：访问规则；普通用户不可读 `/root`、`/var/log`、`/etc/shadow`，只可写自己的 home 与 `/tmp`；Windows 大小写别名不能绕过规则。
+- [src/sha256.rs](src/sha256.rs)：无依赖的 SHA-256 实现，含 FIPS 测试向量。
+- [src/terminal.rs](src/terminal.rs)：通过 `rpassword` 原生 Rust 接口隐藏密码输入，无辅助脚本/子进程；不可用时拒绝可见回退。EOF、空输入、跳过与确认不匹配分别处理。
+- [tests/terminal_pty.rs](tests/terminal_pty.rs)：仅供测试的 Windows ConPTY 验收；检查密码不回显、普通输入回显恢复，以及密码不落入 shadow/日志明文。
+- [src/logging.rs](src/logging.rs)：日志服务，保留 open/record/tail 接口；普通追加为 HostBuffered，轮转及跟进有显式凭据。
+- [src/filesystem/log_store.rs](src/filesystem/log_store.rs)：受管日志 V2、正文/journal 上限、原子切代、服务写入门、有归属恢复；历史无归属日志不自动接管。
+- [tests/filesystem/log_store.rs](tests/filesystem/log_store.rs)、[tests/logging_cli.rs](tests/logging_cli.rs)：故障与守卫对照、未知数据保留及双实际进程日志验收。
+- [tests/filesystem_cli.rs](tests/filesystem_cli.rs)：mv/cp/stat/find/du 真实命令闭环、拒绝覆盖和宿主路径。
+- [src/shell.rs](src/shell.rs)：维护虚拟目录、身份、认证UI与程序退出状态；普通命令走共同前端/runtime，不保留第二份文件/任务分发。
+- [src/script/interactive.rs](src/script/interactive.rs)、[tests/script/interactive.rs](tests/script/interactive.rs)：共同前端、操作标识审计、session控制边界及提示符功能验收。
+- [src/script/arithmetic.rs](src/script/arithmetic.rs)、[src/script/expansion.rs](src/script/expansion.rs)：检查算术与引用/命令/参数展开，解析深度显式贯穿；没有宿主eval。
+- [src/script/globbing.rs](src/script/globbing.rs)、[src/script/pattern.rs](src/script/pattern.rs)：实际有界目录游标、授权glob与模式匹配。
+- [tests/script/expansions.rs](tests/script/expansions.rs)、[tests/script/declarations.rs](tests/script/declarations.rs)、[tests/script/globbing.rs](tests/script/globbing.rs)、[tests/script/case.rs](tests/script/case.rs)：逐功能常用语法、数据预算与实际状态守卫。
+- [tests/script/nested.rs](tests/script/nested.rs)：嵌套sh/source上下文、参数、输入和调用预算的功能守卫。
 - [src/test_support.rs](src/test_support.rs)：测试夹具，仅在测试构建中编译，数据放在项目 `target/test-data`。
 - [.env](.env)：机器相关运行配置，目前只有虚拟根位置。
 
@@ -89,7 +112,7 @@ Rust 初始化允许创建新目录或接管空目录；拒绝接管无项目标
 - 不创建 `swapfile`、`lost+found` 或 `*.usr-is-merged`。
 - 拒绝越界路径、宿主盘符路径、Windows 设备名、alternate data stream、符号链接与 reparse point。
 - 不执行宿主命令，不改启动配置、注册表、服务、驱动、分区，不建立网络连接。
-- **目录约束不等于 OS 级安全隔离**：现有“检查再访问”没有消除外部并发替换路径的 TOCTOU 竞态，也不能限制恶意修改后的程序。
+- **目录与能力句柄约束不等于 OS 级安全隔离**：路径替换保护、系统只读与事务恢复由文件系统模块实施；宿主原型仍不能限制恶意修改后的程序或宿主其他进程，不声称是完整 OS 安全沙箱。
 - 运行时数据根与构建工具行为分开：Cargo 只负责项目 `target` 构建，不读取 `.env`；虚拟根只由运行中的 Rust 程序初始化。
 - 项目中的旧 exe、空目录、过期测试夹具和零散 txt 已清理；`target/repair-backups/` 保留 Cargo 配置备份。
 
@@ -97,8 +120,10 @@ Rust 初始化允许创建新目录或接管空目录；拒绝接管无项目标
 
 - **历史已验证**：v0.1.2 的 Windows 检查、8 个数据根/配置测试、命令行实际运行及中文输入通过。
 - **此前已核验**：五个外部脚本已撤回，Rust 初始化中自动写 Cargo 配置的逻辑已撤回。
-- **2026-11-07 已验证**：五模块完成后 `cargo test --offline` 54 passed、0 failed；`cargo build --offline` 通过；以全新空目录作为虚拟根运行 `target/debug/elara-host.exe`，25 行输入覆盖二十个命令的关键路径，退出码 0，虚拟根外无写入，`ps` 不含宿主进程。细节见[命令账本 §8.1](docs/ubuntu-style-commands.md#81-五模块验收2026-11-07当前有效)。
-- **未验证**：真实交互 TTY 与 Ubuntu / Linux 原生运行未执行。
+- **2026-11-07 已验证**：`cargo test --offline` 中 73 个单元测试、1 个 Windows ConPTY 集成测试全部通过。原生终端测试确认两次密码输入不回显、普通命令输入回显恢复、退出码 0、shadow/日志无测试密码明文。输入流测试同时覆盖一次 Enter 跳过、确认前 EOF、不匹配不修改、拒绝权限操作不消费后续命令。细节见[命令账本 §8.1](docs/ubuntu-style-commands.md#81-原生-rust-密码输入与计数修正验收2026-11-07当前有效)。
+- **此前全量快照（2026-11-08，190项）**：`cargo test --offline --target-dir target/script-build -- --test-threads=1` 已通过：133 个模块单元测试、54 个 `tests/script/` 功能测试、1 个 FD 真实进程、1 个脚本真实进程、1 个 ConPTY 测试，合计 190。`cargo clippy --offline --target-dir target/script-build --all-targets -- -D warnings` 通过。FD 14 项包含在 54 中，文件系统批次已包含在 133 内，不重复累计；详见[句柄命令专题](docs/file-descriptors.md)。旧 128 等保留为历史快照。
+- **本轮稳定全量（2026-11-08）**：`cargo test --offline --target-dir target/shell-build -- --test-threads=1 --nocapture`：169模块+145脚本+6实际进程/ConPTY，**320全过，exit0**；源码/测试前后一致。真实程序验证2MiB→2097152、作业暂停/恢复与取消130、退出7；流式/消费/取消必要性对照成立。**严格Clippy未过**：并行FS的ownership.rs/ownership_model.rs三处lint，未修改其业务/守卫或放宽门槛。五步限定功能的验收及剩余质量门见[脚本账本](docs/shell-scripting.md#9-已批准开发顺序)，FS状态仍由[文件系统账本](docs/filesystem.md)维护。275/236/190只作历史，不累计。
+- **未验证**：Ubuntu/Linux 原生运行、快速粘贴竞态、所有 Windows 终端宿主的兼容性；Windows ConPTY 结果不外推为所有终端都已验证。
 
 ## 1. 完整操作系统的边界
 
@@ -352,6 +377,10 @@ Rust 可以用于内核、驱动和用户态组件。裸机内核通常使用 `#
 
 | 日期 | 修订内容 |
 |---|---|
+| 2026-11-08 | 共同前端、嵌套脚本与常用语法限定子集闭环；显式解析深度、字节输出、状态码/EXIT、作用域/IFS/glob接通。累计输入/参数/保存绑定预算守卫落到实际状态；最终152+118+5=275与严格Clippy通过。真正流式/一般作业继续实施，不冒充独立内核或完整Bash。 |
+| 2026-11-08 | FD 顶层命令及子命令族薄接入真实文件对象/代际表；打开按账号授权，su关闭旧能力保留代际，脚本共享表；14项FD功能与动态token真实进程通过，摘掉关闭门的对照按预期红。最终133+54+1+1+1=190通过、严格Clippy通过；旧128等为历史，不声称mv/cp/stat已接交互入口。 |
+| 2026-11-07 | 增加文件系统专题入口，复核最新全量87+39+1+1=128通过；FS24项已包含在87中。此前126作为历史快照，不累计旧批次。P2任务所有者登记、全量/tmp与/run清扫、日志轮转仍未落实；未声称Linux原生或真实断电验收。 |
+| 2026-11-07 | 接入完整脚本语言子集与共享模块命令接口，命令数为24（`.`为source别名）；新增src/lib.rs让实际程序与tests共用模块。脚本新增测试全部位于tests，39个功能测试通过；全量85+39+1+1=126通过。保留旧批次证据，不声称完整Bash、真正进程管道或Linux原生已验收。 |
 | 2026-11-06 | 将本次对话的完整操作系统模块说明整理为 ElaraOS 项目入口；补充模块部署位置、可选功能和当前未实现状态，保留文件读取示例与建议开发主线。 |
 | 2026-11-06 | 用户确认正式名称为 ElaraOS · 星澜；同步更新文档名称，并将项目目录更名为 elara_os。 |
 | 2026-11-06 | 新增详细模块文档与读取同一 Markdown 正文的 HTML 阅读视图，同步入口；保留本文件的项目说明与实际状态，明确通用能力版图不代表已实现功能。 |
@@ -359,5 +388,7 @@ Rust 可以用于内核、驱动和用户态组件。裸机内核通常使用 `#
 | 2026-11-07 | 按用户确认撤回自动写项目 Cargo 配置的 Rust 函数及调用，删除五个外部脚本，保留纯 Rust 初始化；源版本为 v0.1.3。旧 .cargo/config.toml 删除及最新编译测试被自动权限机制阻拦，状态标为未完成，不沿用历史通过结论。 |
 | 2026-11-07 | 纠正构建边界：删除把构建产物指向虚拟根的项目 Cargo 配置（备份于 target/repair-backups），测试夹具改到项目 target/test-data；按用户确认清理空目录、旧 exe 与过期测试数据；系统默认目录布局和根标记迁入 src/config.rs，删除顶层 txt。`cargo test` 25 passed，`cargo build`/`cargo run` 通过。 |
 | 2026-11-07 | 按用户确认依次完成五个模块：文件读写层、命令解析器、任务模块、`/etc` 用户模块、`/var/log` 日志模块；新增 `command_line.rs`、`tasks.rs`、`users.rs`、`logging.rs`。命令数从八个增至二十个。`cargo test` 54 passed；全新虚拟根真实进程验收通过。 |
+| 2026-11-07 | 两轮用户实测反馈修正：新增 `permissions.rs`、`sha256.rs`、`terminal.rs`；权限模型、`/etc/shadow` 密码、`rmdir`、ANSI `clear`、root 密码引导、`su` 自检、交互式隐藏密码输入。命令数二十二；`cargo test` 68 passed；真实进程验收通过。 |
+| 2026-11-07 | 收尾修正：命令计数统一为 22；密码输入去除 PowerShell/stty，使用固定版本 Rust 安全库，隐藏失败不读可见输入；一次 Enter 跳过、EOF/不匹配取消和权限预检明确化；新增 shadow 读取及 Windows 大小写别名保护。73 单元测试 + 1 原生 Windows ConPTY 测试通过，验证密码不回显和输入模式恢复；Linux及其他终端兼容性未外推。 |
 | 2026-11-07 | 新增初始化后命令账本并与模块总览互链；核对期间源码接入 cd 与虚拟当前目录，就地修正为八命令。当前源码经 rustc 编译、Windows 4 会话 / 54 行输入验收通过，保留旧权限阻塞历史与当前 Cargo 配置失败，不修改源码或配置，不声称 Linux 原生或单元测试全套通过。 |
 | 2026-11-07 | 新增设计原则文档（无垃圾与流畅）并接入 README 与命令账本的选模块流程；核对源码后记录 P1 系统目录可写、P3 暂存文件与目标同目录两处与原则不符，列出按优先级排序的六项改造。本轮只写文档，未改源码。 |

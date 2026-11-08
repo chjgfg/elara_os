@@ -1,15 +1,6 @@
 #![forbid(unsafe_code)]
 
-mod command_line;
-mod config;
-mod filesystem;
-mod initialization;
-mod shell;
-mod tasks;
-#[cfg(test)]
-mod test_support;
-mod users;
-mod virtual_path;
+use elara_os::{config, filesystem, initialization, shell};
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -41,13 +32,16 @@ fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let interactive = stdin.is_terminal() && stdout.is_terminal();
-    if let Err(error) = shell::run(
+    match shell::run_status(
         &mut stdin.lock(),
         &mut stdout.lock(),
         interactive,
         &data_root,
     ) {
-        eprintln!("Console I/O error: {error}");
-        process::exit(1);
+        Ok(status) => process::exit(i32::from(status)),
+        Err(error) => {
+            eprintln!("Console I/O error: {error}");
+            process::exit(1);
+        }
     }
 }

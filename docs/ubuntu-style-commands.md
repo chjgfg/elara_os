@@ -4,14 +4,14 @@
 
 ## 1. 权威入口、范围与证据
 
-- **核对日期**：2026-11-07。
+- **核对日期**：2026-11-08。
 - **项目入口**：[README](../README.md) 管理工程状态、启动验收与文档索引。
 - **模块职责**：[完整操作系统模块总览](operating-system-modules.md) 解释底层模块及依赖。
 - **命令账本**：本文件维护初始化后命令的可用性、实际语义、Ubuntu 风格目标及命令到模块的映射；新增命令必须同步本文件、程序 `help` 和 README。
 - **源码依据**：[命令分发](../src/shell.rs)、[受限文件访问](../src/filesystem.rs)、[启动入口](../src/main.rs)、[Rust 初始化](../src/initialization.rs)、[集中配置与目录布局](../src/config.rs)。
 - **范围**：ElaraOS 自己的命令环境，不是 Windows PowerShell，也不是宿主 Ubuntu 的 Bash。下文命令输入到 ElaraOS 中；不要把未来的管理命令复制到宿主执行。
 - **定位**：当前为使用宿主标准库的 Rust 命令行原型，不是独立内核。Ubuntu 风格意味着先参考命令名称与常见用法，不承诺 Bash、POSIX、GNU 工具参数或 Linux ABI 完整兼容。
-- **本轮运行证据**：v0.1.3 当前源码在 Windows 上经 `cargo test --offline` 25 passed、`cargo build --offline` 通过；`target/debug/elara-host.exe` 以默认 `.env` 启动并完成 `pwd/cd/ls/exit` 实际运行。此前 `rustc` 快照验收（4 个会话、54 行输入）保留在第 8 节作为历史证据。Ubuntu / Linux 原生运行未实测。
+- **当前运行证据（2026-11-08）**：`cargo test --offline --target-dir target/shell-build -- --test-threads=1 --nocapture`：169模块单元+145脚本功能+6实际进程/ConPTY，**320全部通过，exit 0**；源码/测试前后一致。共同前端/嵌套/常用语法和M5流式/合作式作业已功能验收，2MiB管道与取消130已真实运行。**严格Clippy仍未通过**：FS的ownership.rs/ownership_model.rs三处lint，未改对方文件或放宽检查。详细证据和必要性对照由[脚本专题](shell-scripting.md#8-验收记录)维护；275/236/190等只作历史不累计。文件系统语义见[文件系统专题](filesystem.md)，句柄见[句柄命令](file-descriptors.md)。Linux原生、真实断电和全部敌对并发未验证。
 
 ### 1.0 运行方式
 
@@ -25,21 +25,36 @@
 | 部分可用 | 已有命令，但与 Ubuntu 的常见能力有差异 | 只使用明确列出的子集，先补契约再扩展 |
 | 待实现 | 当前入口没有此能力 | 用于选模块和定验收，不得报告为初始化后已经能运行 |
 
-**当前接通二十个命令：`help`、`info`、`pwd`、`cd`、`ls`、`cat`、`mkdir`、`touch`、`rm`、`echo`、`sleep`、`ps`、`wait`、`whoami`、`users`、`useradd`、`su`、`log`、`clear`、`exit`。创建了 Ubuntu 风格目录，不等于目录对应的内核、服务或工具已经实现。**
+**本表列三十四个常用系统/会话命令：`help`、`info`、`pwd`、`cd`、`ls`、`cat`、`mkdir`、`touch`、`rm`、`rmdir`、`mv`、`cp`、`stat`、`find`、`du`、`echo`、`sleep`、`ps`、`wait`、`jobs`、`fg`、`bg`、`kill`、`whoami`、`users`、`useradd`、`passwd`、`su`、`log`、`sh`、`source`、`fd`、`clear`、`exit`。`.` 为 `source` 别名，`&` 是语法操作符，`fd` 子命令不重复计。共同语言另有 `printf/wc/test/true/false/export/:` 等内建；新增对象归属桥以文件系统账本为准，不将三十四误称全部可解析命令总数。创建了 Ubuntu 风格目录，不等于对应内核、服务或工具已经实现。**
+
+交互与脚本共用词法/AST/求值入口，支持常用语法、嵌套 `sh/source`、适用内建阶段的并发流式管道和作用域 `&` 作业。非适用阶段显式回退到64KiB缓冲；不是完整 Bash、内核 IPC 或进程组，每次提示符输入仍要求完整单行程序。
 
 ### 1.2 五模块增量（2026-11-07）
 
 | 模块 | 新增命令 / 能力 | 边界 |
 |---|---|---|
-| 文件读写层 | `cat`、`mkdir`、`touch`、`rm` | 只在虚拟根内；拒绝 `rm /`、系统目录、`..`、宿主路径、链接、设备名 |
-| 命令解析器 | 双引号、单引号、反斜杠转义 | `> < \| ; & $ * ? \`` 直接报错，不执行 |
+| 文件读写层 | `cat`、`mkdir`、`touch`、`rm`、`rmdir` | 只在虚拟根内；拒绝 `rm /`、系统目录、`..`、宿主路径、链接、设备名；`rm` 对目录、`rmdir` 对非空目录给出精确错误 |
+| 交互命令解析器 | 共用脚本前端，引号、变量、连接符、管道与重定向 | 旧单行解析器不再参与普通命令分发；不支持的语法整行拒绝 |
+| Shell 脚本 | `sh/source/.`、常用语法、并发流式阶段、有界回退、作用域作业 | 不执行宿主程序；流式与回退策略/成本、cooperation/身份边界见[脚本专题](shell-scripting.md) |
+| 文件句柄命令 | `fd open/read/readat/write/writeat/seek/truncate/stat/dup/sync/close/closeall` | 由文件系统实现IO，ModuleCommands薄适配；打开检查账号，表绑定uid，身份切换关闭能力 |
 | 任务模块 | `sleep N [bg]`、`ps`、`wait ID` | 任务是程序内部对象，`ps` 不列出宿主进程，不能操作宿主进程 |
-| 用户模块 | `/etc/passwd`、`whoami`、`users`、`useradd`、`su` | `root`（uid 0）是唯一管理员；账户与宿主账户无关；`su` 无密码 |
-| 日志模块 | `/var/log/elara.log`、`log [N]` | 启动和每条命令都记录；日志失败只警告不中断 |
+| 用户与权限 | `/etc/passwd`、`/etc/shadow`、`whoami`、`users`、`useradd`、`passwd`、`su` | `root`（uid 0）是唯一管理员；密码为加盐 SHA-256 多轮哈希；普通用户不能读 `/root` 和 `/var/log`，只能写自己的 home 和 `/tmp` |
+| 日志模块 | `/var/log/elara.log`、`log [N]` | 启动和每条命令都记录；`su/passwd/useradd` 不记录密码；仅 root 可查看 |
+
+### 1.3 权限模型
+
+| 主体 | 读 | 写 |
+|---|---|---|
+| `root` | 合法虚拟路径（文件系统保留空间除外） | 可请求写入，但必须通过文件系统写入分类；系统只读区与未分类路径不能写，系统目录本身不可删除 |
+| 普通用户 | 除 `/root`、`/var/log`、`/etc/shadow` 外的路径 | 仅自己的 home（`/home/<name>`）和 `/tmp` |
+
+Windows 路径的权限比较同时覆盖大小写别名，例如 `/ROOT`、`/VAR/LOG`、`/ETC/SHADOW` 不能绕过规则；其他平台保持本地大小写语义。
+
+`su <name>` 由 root 执行时不需要密码；普通用户切换账户必须提供密码：`su <name> <password>`。切换后若当前目录对新用户不可读，自动回到 `/`。
 
 ## 2. 初始化完成的含义
 
-启动顺序为：读取配置 → Rust 初始化专用数据根 → 校验数据根 → 进入命令循环。不是先进入 Shell，再执行某条 `init` 命令；目前没有 `init` 或 `source .env` 命令。
+启动顺序为：读取配置 → Rust 初始化专用数据根 → 校验数据根 → 进入命令循环。不是先进入 Shell，再执行某条 `init` 命令；目前没有 `init` 命令；`source` 运行的是虚拟根内的脚本，不用于加载项目启动配置 `.env`。
 
 默认读取启动工作目录中的 `.env`，也可以通过程序的唯一位置参数指定配置文件。当前仓库配置为 `ELARA_DATA_ROOT=D:/os`，不是 Linux 通用配置；部署到 Linux 时必须另行指定当地合法的绝对路径，不得照搬 Windows 盘符。
 
@@ -57,7 +72,10 @@
 进入终端后：
 
 - 交互模式提示符包含当前用户和虚拟当前目录，初始为 `root@elara:/> `，切换后例如 `alice@elara:/usr> `；重定向输入时不显示提示符。
-- 启动时自动创建 `/etc/passwd`（仅 `root`）和 `/var/log/elara.log`（如不存在），并记录一条 `startup` 日志。
+- 启动时自动创建 `/etc/passwd`（仅 `root`）、`/etc/shadow` 和 `/var/log/elara.log`（如不存在），并记录一条 `startup` 日志。
+- **root 首次启动没有密码时会提示设置**：输入并确认新密码即生效；按一次 Enter 跳过，不会额外消费下一条命令，下次启动再提醒。没有 root 密码时普通用户无法切回 root。
+- 交互密码读取使用固定版本 `rpassword 7.3.1` 的原生 Rust 接口（Windows 独立 `CONIN$` 句柄，Unix `/dev/tty`），不调用 PowerShell、`stty` 或其他辅助进程。隐藏读取失败时返回错误，**拒绝退回可见输入**。重定向输入是显式的测试/自动化输入方式，不代表隐藏输入。
+- 新密码输入不匹配、确认前 EOF 都不会修改密码。权限不足的 `useradd/passwd` 在读取密码前被拒绝，不会消费后续命令。
 - 每次进入命令环境，虚拟当前目录从 `/` 开始；`cd` 不修改宿主进程的工作目录。
 - `/` 表示 ElaraOS 的虚拟根，当前 Windows 实例对应配置的数据目录，而不是宿主磁盘根。
 - `/root` 只是目录名，不表示当前身份是 Linux `root` 用户。
@@ -65,7 +83,7 @@
 - `/bin`、`/sbin`、`/lib` 是普通目录，不是 Ubuntu 的合并 `/usr` 软链接。
 - `/snap` 不表示安装了 Snap；`/boot` 不表示已有启动镜像。
 - 不执行宿主命令，不建立网络连接，不修改宿主服务、驱动、分区或启动配置。
-- 路径限制不是 OS 级安全沙箱；检查后被外部并发替换路径的 TOCTOU 风险仍未消除。
+- 路径、能力句柄与恢复规则由文件系统模块约束；这些不是完整 OS 级安全沙箱，不能限制恶意改写后的宿主程序。
 
 ## 3. 当前初始化后可以输入的命令
 
@@ -73,30 +91,44 @@
 
 | 命令 | 示例 | 当前实际行为 | Ubuntu 风格差异 / 状态 |
 |---|---|---|---|
-| `help` | `help` | 列出当前二十个命令 | 当前可用；项目内置帮助，不是 Bash 的全部内建命令帮助 |
+| `help` | `help` | 列出常用命令 | 当前可用；独立提示符 UI 命令，不是 Bash 的全部内建帮助 |
+| `mv` | `mv /tmp/a /tmp/b` | 真实文件/目录原子改名，无覆盖和copy/delete回退 | 部分可用；凭据分别报告源/目标目录持久性 |
+| `cp` | `cp /tmp/a /tmp/b` | 复制一个文件到新名字，上限 1 MiB，不覆盖 | 部分可用；原子发布与跟进清理有显式报告 |
+| `stat` | `stat /tmp/a` | 读取真实宿主后端元数据 | 部分可用；host_readonly不是虚拟账号权限 |
+| `find` | `find /tmp` | 有界、逐路径授权的目录树列举 | 部分可用；无GNU选项，不公布失败的半棵树 |
+| `du` | `du /tmp` | 逻辑字节和对象计数 | 部分可用；physical_usage明确UnavailableOnHostBackend |
+| `fd` | `fd help`、`fd open /tmp/a create`、`fd read SLOT:GEN 10` | 真实文件对象/代际表的薄接入，交互与脚本共用表；su 关闭旧能力 | 部分可用；SLOT:GEN 只在本会话有效，read 不添换行；详见[句柄命令](file-descriptors.md) |
+| `sh` | `sh -c 'echo hello; false || echo recovered'`、`sh /tmp/demo.sh`、`sh -n /tmp/demo.sh` | 运行脚本文本/文件或仅检查语法；采用隔离的脚本上下文 | 部分可用；详见[脚本专题](shell-scripting.md)，不执行宿主程序 |
+| `source` | `source /tmp/context.sh`、`. /tmp/context.sh` | 保留变量、函数、目录；参数调用后恢复，`.` 为别名 | 部分可用；`return`结束source调用，`exit`结束当前调用环境 |
 | `info` | `info` | 输出版本、hosted 模式、宿主平台、数据根、当前用户和能力边界 | 当前可用；项目专用命令，不是 Ubuntu 通用系统信息接口 |
 | `pwd` | `pwd` | 输出会话的虚拟当前目录，初始为 `/` | 当前可用；不支持 `-L/-P` 等选项 |
-| `cd` | `cd /usr`、`cd bin`、`cd ..`、`cd "my docs"`、`cd` | 切换到一个已有虚拟目录；无参数回到 `/`；成功不输出文本，失败保持原目录 | 部分可用；无参数不是 Ubuntu 的 `$HOME`；不支持 `cd -`、`~` |
-| `ls` | `ls`、`ls /usr`、在 `/usr` 下 `ls bin` | 列出一个虚拟目录；无参数列当前目录，相对路径从当前目录解释 | 部分可用；不支持选项、多路径、通配符或文件详情 |
-| `cat` | `cat /etc/passwd`、`cat "notes 1.txt"` | 输出一个普通文件的内容，上限 65536 字节 | 部分可用；单文件，无选项，超限报错而不是截断 |
-| `mkdir` | `mkdir docs`、`mkdir "my docs"` | 在已有目录内创建一个目录 | 部分可用；无 `-p`，父目录必须存在，已存在报错 |
-| `touch` | `touch a.txt` | 创建一个空文件 | 部分可用；已存在报错而不是更新时间戳 |
-| `rm` | `rm a.txt` | 删除一个普通文件 | 部分可用；不删目录，无 `-r/-f`；`rm /`、系统目录、`.elara-root` 被拒绝 |
-| `echo` | `echo hello`、`echo "x  y"` | 输出参数并以单个空格连接 | 部分可用；引号内空格保留；不解析 `-n`、变量或重定向 |
-| `sleep` | `sleep 2`、`sleep 5 bg` | 前台等待 N 秒并记录任务；`bg` 作为后台任务启动 | 部分可用；整数秒 0–3600；`bg` 代替 Bash 的 `&` |
-| `ps` | `ps` | 列出本程序的任务表：ID、状态、命令 | 部分可用；只显示 ElaraOS 任务，永远不显示宿主进程 |
-| `wait` | `wait 2` | 阻塞直到任务退出，显示退出状态 | 部分可用；只接受一个任务 ID |
+| `cd` | `cd /usr`、`cd bin`、`cd ..`、`cd ~/docs`、`cd` | 切换已有虚拟目录；无参数使用 `$HOME`；失败保持原目录 | 部分可用；不支持 `cd -`、`~user` |
+| `ls` | `ls`、`ls /usr`、在 `/usr` 下 `ls bin` | 列出一个虚拟目录；无参数列当前目录，相对路径从当前目录解释 | 部分可用；Shell有glob，但ls仅接受一个目录，无选项/文件详情，匹配多项仍报参数错误 |
+| `cat` | `cat /etc/passwd`、`cat < /tmp/a`、`cat /tmp/large \| wc -c` | 文件/当前阶段stdin的原始字节，不补换行 | 部分可用；最终stdout和缓冲路径限65536字节，适用流式中间数据可超限；无GNU选项 |
+| `mkdir` | `mkdir docs notes` | 在已有目录内逐个创建目录 | 部分可用；无 `-p`，父目录必须存在，已存在报错 |
+| `touch` | `touch a.txt b.txt` | 逐个创建空文件 | 部分可用；已存在报错而不是更新时间戳 |
+| `rm` | `rm a.txt b.txt` | 逐个删除普通文件 | 部分可用；对目录报 `use rmdir`；无 `-r/-f`；系统/根/保留路径拒绝 |
+| `rmdir` | `rmdir empty-dir` | 逐个删除空目录 | 部分可用；非空目录报错；无递归；系统目录被拒绝 |
+| `echo` | `echo hello`、`echo -n "$X"` | 已展开参数按空格连接，默认换行；`-n`不换行 | 部分可用；变量与重定向通过共同语言求值 |
+| `sleep` | `sleep 2`、`sleep 5 bg`、`sleep 5 &` | 前台等待并记旧任务；bg参数为旧计时器；&为作用域脚本worker | 部分可用；整数0–3600秒；worker内sleep可合作式暂停/取消，不是宿主调度 |
+| `ps` | `ps` | 列出旧TaskTable的ID、状态、命令 | 不列宿主进程；作用域脚本作业用jobs查看，两个ID命名空间分开 |
+| `wait` | `wait 2`、`wait %2` | 数字ID等旧任务；%ID等脚本作业、收集输出、移除并join | 一次一个ID；作用域ID回收后不复用；worker不能等待自身或阻塞等旧任务 |
+| `jobs` | `jobs` | 列出当前UID的作用域作业及实际状态 | 部分可用；完成未wait仍占槽，总记录最多16 |
+| `fg` | `fg %2` | 请求恢复、等待并回收作用域作业 | 合作式，不切换宿主TTY进程组 |
+| `bg` | `bg %2` | 请求恢复作用域作业，不等待 | 仅恢复已有ID，不创建新的后台作业 |
+| `kill` | `kill -STOP %2`、`kill -CONT %2`、`kill -TERM %2` | STOP等实际ACK；CONT恢复；TERM/INT请求取消 | 部分可用；缺省TERM，取消需实际观察；不接受宿主PID/真实信号 |
 | `whoami` | `whoami` | 显示当前 ElaraOS 用户名 | 当前可用；与宿主登录账户无关 |
 | `users` | `users` | 列出 `/etc/passwd` 中的账户、uid、home | 部分可用；格式为项目自定义 |
-| `useradd` | `useradd alice` | 创建账户并建立 `/home/alice`；仅 root | 部分可用；无选项、无密码、无组 |
-| `su` | `su alice`、`su` | 切换当前用户；无参数切回 root | 部分可用；无密码校验，仅用于权限模型演示 |
-| `log` | `log`、`log 50` | 显示 `/var/log/elara.log` 最后 N 行（默认 20，范围 1–1000） | 当前可用；项目专用命令 |
-| `clear` | `clear` | 输出 40 个空行 | 部分可用；不是终端控制序列清屏，不擦除滚动历史 |
-| `exit` | `exit` | 输出 `Bye.` 并结束本程序 | 当前可用；不接受状态码，不关机、不关闭宿主终端 |
+| `useradd` | `useradd alice`、`useradd alice pass1234` | 创建账户、设置密码并建立 `/home/alice`；仅 root。省略密码时隐藏输入两次 | 部分可用；密码至少 4 字符，不含空格和 `:` |
+| `passwd` | `passwd`、`passwd alice`、`passwd alice newpass` | 设置密码；无参数改自己；root 可改任何人，普通用户只能改自己。省略密码时隐藏输入两次 | 部分可用；两次输入不一致则不改 |
+| `su` | `su`、`su alice`、`su root pass` | 切换当前用户；无参数切 root；root 免密，其他人需密码（省略时隐藏输入）；切到自己直接提示 | 部分可用；无 `-` 登录 shell 语义 |
+| `log` | `log`、`log 50` | 显示 `/var/log/elara.log` 最后 N 行（默认 20，范围 1–1000）；仅 root | 当前可用；项目专用命令 |
+| `clear` | `clear` | 交互模式发送 ANSI 清屏序列；重定向模式输出 `[screen cleared]` | 当前可用；依赖终端支持 ANSI |
+| `exit` | `exit`、`exit 7` | 输出 `Bye.`，结束本程序并返回指定状态；缺省使用 `$?` | 当前可用；0–255，不关机、不关闭宿主终端 |
 
-`help/info/pwd/ps/whoami/users/clear/exit` 都不能带参数；例如 `pwd /usr` 会输出 `'pwd' takes no arguments.`，不会切换目录。命令名区分大小写。
+`help/info/clear` 不接受参数，认证及UI控制命令仅支持独立提示符调用。普通命令共享状态码，`echo $?`可以观察；最终程序状态不能证明之前所有命令成功。命令名区分大小写。
 
-命令行解析规则：空白分隔参数；双引号和单引号把含空格的内容作为一个参数；反斜杠转义下一个字符；`> < | ; & $ * ? \`` 出现在引号外时整行报错并不执行任何部分。
+命令行使用共同脚本语法：引号/转义保留字面属性，变量展开不重新解释为语法。`< > >> | ; && || &`可用；未支持的语法在整行解析时拒绝，前面的命令不先执行。多路径命令按顺序执行，不是事务；运行时后续失败不回滚此前操作。
 
 `ls` 的当前规则：
 
@@ -115,52 +147,43 @@
 
 ```text
 help
-info
 whoami
-cd /home
-mkdir "my docs"
-cd "my docs"
-touch "notes 1.txt"
-ls
-cat "notes 1.txt"
-rm "notes 1.txt"
-cd /
-sleep 1 bg
-ps
-wait 1
 useradd alice
 su alice
+su alice
+cd /root
+log
+cd /home/alice
+touch mine.txt
+passwd
+su root
 whoami
-useradd bob
-su
-users
-cat /etc/passwd
-log 5
 exit
 ```
 
-判断方法：`help` 列出二十个命令；`whoami` 先显示 `root`，`su alice` 后显示 `alice`；`alice` 执行 `useradd bob` 得到 `Only root can manage users.`；`ps` 显示 `sleep 1` 任务，`wait 1` 输出 `[1] exited 0`；`cat /etc/passwd` 显示 `root:0:/root` 与 `alice:1000:/home/alice`；`log 5` 显示带时间戳、用户名和命令的最后 5 行；最后输出 `Bye.`。
+说明：首次启动会先要求设置 root 密码（输入两次，或 Enter 跳过）。`useradd alice` 后会隐藏输入两次 alice 的密码；`su alice` 第二次输入得到 `Already alice; nothing to do.`；alice 执行 `cd /root`、`log` 被拒绝；`passwd` 无参数修改 alice 自己的密码；`su root` 要求输入 root 密码，正确后 `whoami` 显示 `root`。
 
-### 3.3 现在不能按 Bash 写的语法
+### 3.3 与 Bash 仍有差异的语法
 
-| 输入 | 当前行为 | 缺少的能力 |
+| 输入 | 当前行为 | 边界 |
 |---|---|---|
-| `cd` 无参数 | 回 `/`，不是 `$HOME` | `~`、`cd -`、环境变量等 Bash 扩展 |
-| `echo $HOME` | 整行报错：`'$' is not supported` | Shell 环境变量与展开 |
-| `echo -n hello` | 输出字面文本 `-n hello` 并换行 | `echo` 选项 |
-| `echo hello > /tmp/a.txt` | 整行报错：`'>' is not supported`，不创建文件 | 重定向 |
-| `ls \| cat` | 整行报错：`'\|' is not supported` | 管道解析与 IPC |
-| `pwd && ls`、`a; b` | 整行报错：`'&'` / `';' is not supported` | 命令连接符与状态码传播 |
-| `rm *.txt` | 整行报错：`'*' is not supported`，不删除任何文件 | 通配符展开 |
-| `sleep 5 &` | 整行报错；后台任务使用 `sleep 5 bg` | Bash `&` 语法 |
-| `rm -r dir`、`mkdir -p a/b` | `-r`/`-p` 被当作路径或参数过多 | 选项解析、递归删除 |
-| `exit 0` | 拒绝参数，不退出 | 带状态码的退出契约 |
+| `cd` 无参数、`echo $HOME` | 使用真实账户home初值的变量，支持~和~/path | 改USER不改变安全主体；`~user`、`cd -`尚未支持 |
+| `echo -n hello`、`echo hello > /tmp/a.txt` | 不换行或实际重定向 | byte-exact；不是GNU全部选项 |
+| `ls \| cat`、`cat /tmp/large \| wc -c`、`pwd && ls`、`a; b` | 共同AST求值和状态传播 | cat/wc等适用内建真实并发流式；ls/模块/复杂展开/输出重定向等显式64KiB回退，不冒充内核IPC |
+| `sh -c 'sh -c "echo nested"'` | 嵌套解释，复用模块和总调用预算 | 不运行宿主sh |
+| `rm *.txt` | 在授权虚拟目录展开并逐个删除匹配的普通文件；未匹配保留字面量 | 有界glob，不递归，不跟链接；后续运行失败不回滚前面操作 |
+| `$(...)`、`$((...))`、`${X:-word}` | 已支持常用展开子集 | 算术无自增/赋值；参数替换仅字面模式；详见专题 |
+| `case/local/unset/set -e/-u/trap EXIT` | 已支持明确子集 | local仅函数，EXIT非宿主信号，未支持Bash全部扩展 |
+| `sleep 5 &` | 实际作用域worker；jobs/fg/bg/wait %ID/kill合作式控制 | 后台stdin为EOF，输出由wait/fg收集；Shell退出/EOF/身份变更取消并join，非宿主进程 |
+| `rm -r dir`、`mkdir -p a/b` | 不按GNU选项执行 | 不提供递归删除/递归创建 |
+| `su -` | `-`被当作用户名 | 无登录shell语义 |
+| `exit 7` | 退出程序，实际进程码7 | `sh`隔离exit，source的exit结束调用环境 |
 
-当前普通命令错误只输出文本，循环继续；不是每条命令都有独立的可观察退出码。不能用进程最终退出码为 0 证明中间所有命令成功。
+普通命令状态可通过 `$?`、`&&/||` 观察；不能用进程最终状态0证明所有中间命令成功。
 
 ## 4. Ubuntu 风格目标命令 → 模块对照
 
-**本节除第 3 节明确支持的子集外，全部待实现。** 示例是待实现的目标语法，不是现在能复制执行的命令。不要求直接移植 GNU、systemd 或 apt，也不要求一次性支持全部选项。
+**本节是扩展目标，不是统一的未实现列表。** 第3节/脚本专题已注明的基础子集（stat/cp/mv、常用语法、流式及缓冲回退、合作式作业）已接通；未注明的GNU选项、内核级IPC/进程组和程序装载仍待实现。示例要求文件实际存在；不直接移植GNU/systemd/apt，不承诺全部选项。
 
 “§” 对应[模块总览](operating-system-modules.md)的章节号；各行给出需要联动的底层模块，不是规定每条命令必须独占一个模块。
 
@@ -178,8 +201,8 @@ exit
 | `find /home -name '*.txt'` | 按条件遍历虚拟目录 | §13 文件系统；§19 参数解析 | 限定深度、链接政策与错误传播；不越界访问宿主 |
 | `mkdir /home/demo`、`mkdir -p /home/demo/docs` | 创建目录 | §13 文件系统；§15 访问控制 | 受限写路径、父目录与同名文件冲突；已有目录幂等性 |
 | `touch /tmp/a.txt` | 创建空文件；后续可补更新时间 | §13 文件系统；§5 时间；§15 权限 | 已有文件不截断；区分创建与时间更新，保护标记 |
-| `cp /tmp/a.txt /home/demo/a.txt` | 复制普通文件 | §12 I/O；§13 文件系统 | 默认覆盖策略先定；短写、同文件复制、磁盘满与失败残留 |
-| `mv /tmp/a.txt /tmp/b.txt` | 重命名或移动 | §13 文件系统；§12 持久化 | 同卷原子性与跨后端降级分开；用返回枚举表达代价 |
+| `cp /tmp/a.txt /home/demo/a.txt` | 单文件基础子集已可用；大文件流式等扩展待实现 | §12 I/O；§13 文件系统 | 当前不覆盖，复制上限1MiB，显式提交/持久性/跟进报告 |
+| `mv /tmp/a.txt /tmp/b.txt` | 原子改名基础子集已可用；跨后端迁移待实现 | §13 文件系统；§12 持久化 | 不覆盖，无copy/delete回退；按凭据区分可见提交与目录持久性 |
 | `rmdir /home/demo/empty` | 删除空目录 | §13 文件系统；§15 权限 | 非空拒绝；根、标记及受保护布局目录政策先明确 |
 | `rm /tmp/a.txt` | 删除普通文件 | §13 文件系统；§15 权限 | 删除与递归策略分别设计；实际清理操作仍先交清单等授权 |
 | `ln -s /home/demo /tmp/demo` | 符号链接 | §13 路径与命名空间；§15 隔离 | 后期可选；现阶段明确禁止链接，不能直接取消守卫来支持命令 |
@@ -197,7 +220,7 @@ exit
 | `clear` | 真正的终端清屏 | §19 TTY / 终端 | 终端能力探测；非终端输出不插入不适当控制序列 |
 | `/bin/demo`、`demo arg` | 装载并执行 ElaraOS 程序 | §9 ABI / 装载；§7 进程；§8 内存；§13 文件；§15 隔离 | 定义可执行格式和搜索路径；不是转给宿主 `Command` 运行 |
 | `sleep 1` | 等待指定时长 | §5 时间；§7 阻塞与唤醒；§19 工具 | 单调时钟、参数范围、取消与唤醒；不能忙等冒充调度 |
-| `jobs`、`fg`、`bg`、`wait` | 作业控制和等待退出 | §19 Shell / TTY；§7 进程；§10 事件 | 先有任务、进程组、前后台和信号语义；不建立本机后台任务 |
+| `jobs`、`fg`、`bg`、`wait` | 作用域合作式子集已接；内核作业控制待实现 | §19 Shell / TTY；§7 进程；§10 事件 | 当前%ID、ACK、取消与join；真实进程组、TTY所有权和宿主信号未实现 |
 
 ### 4.3 身份、权限、进程与资源
 
@@ -289,7 +312,38 @@ CPU、中断、物理内存等模块不一定有直接对应的日常命令。�
 
 ## 8. 本轮验收记录
 
-### 8.1 五模块验收（2026-11-07，当前有效）
+### 8.1 原生 Rust 密码输入与计数修正验收（2026-11-07，当前有效）
+
+| 项目 | 结果 | 证据边界 |
+|---|---|---|
+| 完整单元测试 | 73 passed、0 failed | 包括 EOF/空行区分、一次 Enter 跳过、拒绝权限操作不消费输入、shadow 保护、Windows 大小写别名 |
+| Windows 原生终端集成 | 1 passed、0 failed | `tests/terminal_pty.rs` 通过 ConPTY 启动真实程序；root 密码两次不回显，正常命令在 Enter 前可见（证明模式恢复），退出码 0，shadow/log 无测试密码明文 |
+| 依赖与运行边界 | 运行依赖 `rpassword = 7.3.1`；测试依赖 `portable-pty = 0.8.1` | 均为 Rust 库；运行时代码不启动 PowerShell、`stty` 或其他辅助进程。隐藏失败拒绝明文回退 |
+| 命令计数 | 22 个 | 程序 help、命令表和 README 同步；此前“23 个”的计数错误已修正，实际未增删命令 |
+| 未验证范围 | Ubuntu/Linux 原生、快速粘贴竞态、全部 Windows 终端宿主 | ConPTY 测试不等于所有终端兼容性都已确认 |
+
+原生测试最初匹配提示符尾部字面空格失败；ConPTY 将该空格编码成光标移动序列。读取输出后修正提示符识别，不改密码不回显、回显恢复等安全断言。
+
+### 8.2 root 引导、交互式密码、su 自检修正验收（历史批次）
+
+| 项目 | 结果 | 证据边界 |
+|---|---|---|
+| `cargo test --offline` | 68 passed、0 failed | 新增 `terminal.rs`（2）、启动引导（2）、交互式提示行消费（1） |
+| 真实进程端到端 | 全新虚拟根，21 行输入，退出码 0 | 启动提示设置 root 密码并成功；`useradd alice` 隐藏输入两次；`su alice` 第二次报 `Already alice`；`passwd` 无参数改自己；`su root` 错误密码被拒、正确密码成功并进入 `/root` |
+| 密码不落明文 | `/etc/shadow`、`/var/log/elara.log` 均不含明文密码 | 实测文件内容 |
+| 隐藏回显 | 非交互路径已验证；**真实终端隐藏效果未在本会话验证**（无控制台句柄） | 需用户在 Windows Terminal / PowerShell 中实际确认 |
+| Ubuntu / Linux 原生运行 | 未实测 | `stty` 路径未执行 |
+
+### 8.3 权限、rmdir、clear 修正验收（2026-11-07）
+
+| 项目 | 结果 | 证据边界 |
+|---|---|---|
+| `cargo test --offline` | 63 passed、0 failed | 新增 `permissions.rs`（3）、`sha256.rs`（1，含 FIPS 测试向量）、用户密码（1）、rmdir（1）、Shell 权限/rmdir/clear/日志脱敏（4） |
+| 真实进程端到端 | 全新虚拟根，20 行输入，退出码 0 | `rm 1.txt` 对目录报 `use rmdir`，`rmdir` 删除成功；alice 被挡在 `/root`、`/var/log`、`/etc` 写之外；`su root` 无密码被拒；`passwd` 后 `su alice newpass1` 成功 |
+| 密码不落明文 | `/etc/shadow` 与 `/var/log/elara.log` 均不含明文密码 | 实测文件内容 |
+| 真实交互 TTY、Ubuntu / Linux 原生运行 | 未实测 | Windows 非交互结果不外推；`clear` 的 ANSI 序列在 Windows Terminal/PowerShell 7 可用，旧 conhost 未验证 |
+
+### 8.4 五模块验收（2026-11-07）
 
 | 项目 | 结果 | 证据边界 |
 |---|---|---|
@@ -299,7 +353,7 @@ CPU、中断、物理内存等模块不一定有直接对应的日常命令。�
 | 宿主隔离 | `ps` 不含宿主进程；`home/bob` 不存在；虚拟根外无新文件；`usr` 完好 | 实测检查虚拟根实际状态 |
 | 真实交互 TTY、Ubuntu / Linux 原生运行 | 未实测 | Windows 非交互结果不外推 |
 
-### 8.2 历史快照验收（八命令阶段，仅作历史）
+### 8.5 历史快照验收（八命令阶段，仅作历史）
 
 | 项目 | 结果 | 证据边界 |
 |---|---|---|
@@ -343,7 +397,16 @@ PASS: 4 sessions; 54 input lines; 8 commands; cd/pwd/ls state; Unicode; 40-line 
 
 | 日期 | 修订内容 |
 |---|---|
+| 2026-11-08 | M5流式和作用域作业接通，常用清单34项；修订旧不支持&及全部顺序缓冲口径，注明%ID/旧数字ID、cooperation/队列限额、typed fallback、退出/身份join。稳定全量169+145+6=320通过、三个必要性对照成立；严格Clippy仍有FS三处lint，未冒称全绿。 |
+| 2026-11-08 | 常用语法限定子集接入提示符/脚本并验收；新增展开、glob/tilde、case/作用域/IFS/退出选项/EXIT，堵住提示符和累计参数、保存绑定预算通道。最终152+118+5=275和严格Clippy通过，真实程序已运行核心语法；旧236等保留历史。真正流式及一般作业继续实施。 |
+| 2026-11-08 | 文件命令桥、共同前端、exit状态和嵌套sh/source完成验收；三十常用命令清单与额外内建分开计。cat不补换行，多路径顺序执行；修订旧拒绝变量/操作符规则并保留安全守卫。全量152+79+5=236及严格Clippy通过；source exit结束调用环境。常用语法、真正流式管道与一般作业继续实施。 |
+| 2026-11-08 | 新增fd子命令族，顶层计数25；记录token局部作用域、按实际账号打开、su关闭旧能力、流式写入进度和模块输出限额。FD14项与真实CLI通过，最新190（133+54+3）全过，严格Clippy通过；旧批次不叠加。 |
+| 2026-11-07 | 文件系统收尾后复核最新全量87模块+39脚本+1真实脚本进程+1ConPTY=128通过，FS24项包含于87；链接文件系统专题，保留126及旧计数为历史。所有者登记、全量临时目录清扫、日志轮转仍是待落实设计，不扩大平台与断电证据范围。 |
+| 2026-11-07 | 新增sh/source脚本入口并标注`.`别名，保持交互顶层与脚本语法范围分离；支持变量/控制流/函数/重定向/有界管道，直接调用实际文件系统与共享任务/用户/日志。新增测试在tests，39脚本功能测试与全量126通过；以脚本专题为子集语义和覆盖权威。 |
 | 2026-11-07 | 首次建立初始化后命令账本：记录已接入命令及其 Ubuntu 差异，按 Ubuntu 常见用法列待实现命令与模块依赖，补充跨会话选模块顺序、失败边界、验收契约和官方参考入口。 |
 | 2026-11-07 | 初次扫描后源码在核对期间新增并接入 `cd` 与虚拟当前目录；撤销“七命令、`pwd` 固定根、`ls` 相对路径从根解释、路径模块未接入”的过时结论，就地更新为八命令与当前目录语义。当前源码经 rustc 编译及 4 会话 / 54 行输入验收，保留 Cargo 失败、旧判据失败、未测试范围及源码摘要。 |
 | 2026-11-07 | 构建边界纠正后同步：运行方式改为 `cargo run`，目录布局来源改为 `src/config.rs`，撤回指向虚拟根的旧验收程序入口；记录 `cargo test` 25 passed、`cargo build` 通过，源码摘要改标为历史快照。 |
 | 2026-11-07 | 五模块落地：文件读写（`cat/mkdir/touch/rm`）、命令解析器（引号/转义/元字符拒绝）、任务（`sleep/ps/wait`）、用户（`/etc/passwd`、`whoami/users/useradd/su`）、日志（`/var/log/elara.log`、`log`）。命令表更新为二十个命令，试用清单与不支持语法表同步；54 个测试与全新虚拟根真实进程验收通过。 |
+| 2026-11-07 | 用户实测反馈修正：新增 `permissions.rs` 权限模型（普通用户不可读 `/root`、`/var/log`，只可写 home 与 `/tmp`）、`/etc/shadow` 加盐 SHA-256 密码、`passwd` 命令、带密码的 `su`；新增 `rmdir`，`rm` 对目录/缺失路径给出精确错误；`clear` 改为 ANSI 清屏序列；日志不记录密码。命令数二十二；63 个测试与真实进程验收通过。 |
+| 2026-11-07 | 第二轮反馈修正：root 首次启动无密码时引导设置（可跳过）；`su` 到当前用户直接提示；新增 `terminal.rs` 隐藏回显读取，`useradd/passwd/su` 省略密码时交互输入两次确认；`passwd` 无参数改自己。68 个测试与真实进程验收通过；真实终端隐藏效果待用户确认。 |
+| 2026-11-07 | 当前收尾：修正 22 个命令计数；移除 PowerShell/stty 辅助执行，改用原生 Rust 密码读取；隐藏不可用时失败关闭，跳过/EOF/确认不匹配以枚举区分。新增权限预检、shadow 读取保护与 Windows 大小写别名测试。73 单元测试和 1 Windows ConPTY 集成测试通过；旧批次证据继续按历史保留。 |

@@ -116,7 +116,8 @@ pub fn prepare(root: &Path) -> Result<InitState, FsError> {
         fs::create_dir_all(&directory)?;
         inspect_ancestors(&directory)?;
     }
-    DataRoot::open(root)?;
+    let data = DataRoot::open(root)?;
+    data.recover_transactions()?;
     Ok(if !existed {
         InitState::CreatedNewRoot(created)
     } else if !owned {

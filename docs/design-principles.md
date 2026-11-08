@@ -34,8 +34,8 @@
 | 允许写入的根目录 | `/home`、`/root`、`/tmp`、`/var`、`/etc`、`/opt`、`/srv`、`/mnt`、`/media`。各目录的写入类别见 P2。 |
 | macOS 参照 | Signed System Volume：`/System`、`/usr`、`/bin` 密封只读。 |
 | 模块章节 | §13 文件系统、§15.2 隔离、§20 更新事务。 |
-| 当前源码 | `filesystem.rs` 的 `is_protected` 只阻止删除和替换布局目录本身；`create_directory`、`create_file` 通过 `resolve_new` 可以在 `/usr`、`/bin` 下创建新条目。**系统目录目前可写，原则未落地。** |
-| 实现位置 | `filesystem.rs` 增加写入白名单，`resolve_new`、`write_file`、`append_file`、`remove_file` 共用一个检查；错误类型用独立枚举值（如 `ReadOnlySystemPath`），不复用 `ProtectedPath`，让用户知道是"系统目录"而不是"根目录"。 |
+| 当前源码 | **已落实普通写入入口的系统只读规则**：`filesystem/policy.rs` 的统一分类门覆盖创建、替换、追加、文件删除、目录删除，root 身份也不能绕过。配置表在 `config.rs`；更新事务入口尚未实现。 |
+| 实现位置 | `filesystem/policy.rs` / `backend.rs` / `types.rs`。错误为 `ReadOnlySystemPath`，与根/布局目录自身的 `ProtectedPath` 分开。 |
 | 验收 | `mkdir /usr/x`、`touch /bin/y`、`touch /usr/lib/z` 全部拒绝并报系统目录只读；`mkdir /home/x`、`touch /tmp/y` 成功。对照实验：临时摘掉白名单检查，上述命令必须成功，证明检查是必要的。 |
 
 ### P2 每个可写目录有明确的所有者和生命周期
@@ -58,7 +58,8 @@
 - "缓存"的定义：删了之后程序仍然正确只是变慢。不满足这个定义的东西不许放进 `/var/cache`。
 - **macOS 参照**：`~/Library/Caches` 由系统在存储紧张时清空；`/private/tmp` 启动清理；`launchd` 维护 `periodic` 清理日志。
 - **模块章节**：§13、§18.2 日志/配置、§21 日志轮转。
-- **当前源码**：`ROOTFS_DEFAULTS.directories` 只是目录名清单，没有类别和所有者信息。`tasks.rs` 的任务没有所有者字段。
+- **当前源码**：`config.rs` 已有 `DirectoryPolicy`、`WriteClass` 和集中前缀分类表，普通写入拒绝未分类路径。旧 `directories` 保持布局兼容。用户/任务/应用的持久登记与各类别完整生命周期仍未实现，不能把分类完成写成 P2 全部完成。`tasks.rs` 的任务仍没有所有者字段。
+- **日志增量（2026-11-08）**：新建受管日志实现分代限额、轮转、提交前缀校验及有归属恢复；日志预算集中在 `config.rs`，调用接口在 `logging.rs`、实现协议在 `filesystem/log_store.rs`。普通修改受管日志被拒绝，历史无归属日志保留只读，不自动认领。仅日志生命周期子项完成，用户/任务/应用普通对象归属、缓存治理及全量临时数据生命周期仍待实现。普通追加为 HostBuffered，不能据此宣称断电持久化。
 - **实现位置**：`config.rs` 把 `directories: &[&str]` 改成带类别的结构（如 `(path, WriteClass)`），`WriteClass` 枚举 `SystemReadOnly / UserData / Temporary / Cache / Log / RuntimeState / Configuration / Application`；文件系统写接口按类别检查。
 - **验收**：启动两次，第一次在 `/tmp` 创建文件，第二次启动后 `ls /tmp` 为空；`/home` 下的文件两次启动都在。
 
@@ -68,10 +69,10 @@
 |---|---|
 | 规则 | 任何中间产物（暂存写入、下载中的文件、编译中间件）只能在 `/tmp` 或 `/var/cache` 下创建，不能和目标文件放在同一目录。 |
 | 为什么 | 暂存文件放在目标旁边，进程崩溃后它就成了用户目录里一个没人认领的文件——这正是"隐形垃圾"。 |
-| 当前源码 | **已经违反**：`filesystem.rs:242` `write_file` 把暂存文件写成 `<目标>.elara-staged-<pid>`，与目标同目录。进程在 `rename` 前崩溃时该文件永久残留。 |
-| 修正方式 | 二选一，必须选一个并写进本文：(a) 暂存放 `/tmp`，但跨目录 `rename` 在宿主上可能不是原子的，需要单独验收并按降级分支处理；(b) 保留同目录暂存，但启动时扫描并删除所有 `*.elara-staged-*`，且文件名前缀作为系统保留名禁止用户创建。 |
-| 推荐 | (b)。原子替换比跨目录 rename 的降级更重要；启动清扫的成本是遍历一次，代价可控。保留名已经有先例（`.elara-root`）。 |
-| 验收 | 手工制造一个 `/home/x.txt.elara-staged-999`，重启后它消失，`/home/x.txt` 不受影响；`touch /home/a.elara-staged-1` 被拒绝。 |
+| 当前源码 | **本轮已选择并实现方案 (a)**：`filesystem/transaction.rs` 将暂存放在带归属标记的 `/tmp/.elara-transactions/`，普通虚拟路径保留此组件；不再在用户目标文件旁边写 `.elara-staged-*`。 |
+| 当前选择 | 暂存 payload 写入并同步后，通过能力目录句柄进行原子 rename；跨设备或宿主不支持时明确失败，旧文件不变，绝不退回复制覆盖。提交凭据分别报告目录同步和跟进清理状态。 |
+| 恢复规则 | `filesystem/recovery.rs` 只回滚本系统标记的事务残留，不重放目标文件、不跟随链接、不扫普通用户 `/tmp` 文件。未知或错误归属内容保留，未标记事务目录报错。启动与写入共享同一文件锁。历史同目录暂存文件不自动删除。 |
+| 验收 | `tests/filesystem/transaction.rs` / `recovery.rs` / `boundary.rs` 覆盖成功提交、部分暂存失败、模拟跨设备拒绝、并发替换与恢复、归属识别、初始化实际调用恢复，以及路径检查后父目录替换的能力边界。真实跨卷与断电未测，不外推。 |
 
 ### P4 应用自包含
 
@@ -153,3 +154,5 @@
 | 日期 | 修订内容 |
 |---|---|
 | 2026-11-07 | 首次建立。根据用户确认的目标（拒绝分散管理面、拒绝事后清理、纳入 macOS 流畅机制）写成七条原则；核对当前源码后标注 P1 系统目录可写、P3 暂存文件同目录两处与原则不符，以及 P2/P5 缺少类别字段。 |
+| 2026-11-08 | 日志生命周期子项增量：受管日志 V2 源头限额、分代轮转、有归属 /tmp 暂存及提交前缀校验；普通追加显式 HostBuffered，轮转才同步。旧未知归属日志保留只读；普通对象/任务/缓存生命周期不计为完成。发生时序回归后改提交策略，未放宽原 sleep1 判据。 |
+| 2026-11-07 | 文件系统增量修订：P1 普通写入系统只读门落实；P2 集中分类表落实但 owner 登记与完整生命周期仍待实现；P3 从最初推荐 (b) 改选 (a)，采用能力目录下 `/tmp` 私有事务暂存、失败无复制回退、有归属恢复和共享文件锁。24 项 FS 功能测试及全量跨模块测试/CLI 验收通过，真实断电/跨卷/Linux 未外推。 |

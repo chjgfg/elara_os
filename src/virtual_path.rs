@@ -35,6 +35,8 @@ impl fmt::Display for PathError {
     }
 }
 
+impl std::error::Error for PathError {}
+
 impl VirtualPath {
     pub fn root() -> Self {
         Self {
@@ -108,7 +110,10 @@ fn validate_component(component: &str) -> Result<(), PathError> {
             )
         })
     });
-    if component == crate::config::ROOTFS_DEFAULTS.marker_filename
+    if component.eq_ignore_ascii_case(crate::config::ROOTFS_DEFAULTS.marker_filename)
+        || component.eq_ignore_ascii_case(crate::config::ROOTFS_DEFAULTS.transaction_directory)
+        || component.eq_ignore_ascii_case(crate::config::PRIVATE_LOG_DIRECTORY)
+        || component.eq_ignore_ascii_case(crate::config::PRIVATE_OWNER_DIRECTORY)
         || component.ends_with(['.', ' '])
         || reserved
     {
