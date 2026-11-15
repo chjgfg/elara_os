@@ -6,12 +6,14 @@ use std::{fmt, write};
 
 #[derive(Debug)]
 pub enum FsError {
+    Vfs(super::vfs::Error),
     Io(io::Error),
     InvalidRoot,
     InvalidPath,
     AccessDenied(String),
     Link(PathBuf),
     UnmarkedRoot,
+    SystemProviderConflict(String),
     NotDirectory,
     NotFile,
     IsDirectory,
@@ -52,13 +54,31 @@ pub enum FsError {
     LegacyLogReadOnly,
     LogRecordTooLarge,
     LogTailIncomplete,
-    LogFollowupUnconfirmed { generation: u64, error: io::ErrorKind },
-    LogCleanupUnconfirmed { generation: u64, error: io::ErrorKind },
-    LogMaintenanceBlocked { generation: u64, error: io::ErrorKind },
-    LogAppendUnconfirmed { progress: super::log_store::LogWriteProgress, error: io::ErrorKind },
+    LogFollowupUnconfirmed {
+        generation: u64,
+        error: io::ErrorKind,
+    },
+    LogCleanupUnconfirmed {
+        generation: u64,
+        error: io::ErrorKind,
+    },
+    LogMaintenanceBlocked {
+        generation: u64,
+        error: io::ErrorKind,
+    },
+    LogAppendUnconfirmed {
+        progress: super::log_store::LogWriteProgress,
+        error: io::ErrorKind,
+    },
     ServiceOwnedPath,
     InvalidOwnershipRecord,
+    DirectoryModeOnFile,
     OwnershipCapacity,
+    AccessCommitPending(Box<FsError>),
+    TaskScopeMismatch,
+    ResourceQuota,
+    ResourceInactive,
+    ResourceDetached,
     OwnershipIdentityExhausted,
     UnownedOwnershipStore,
     OwnershipRecoveryBlocked,
@@ -67,18 +87,26 @@ pub enum FsError {
     LegacyOwnershipUnknown,
     OwnershipDenied,
     OwnershipClassMismatch,
-    OwnershipCommitPending { object: u64, error: Box<FsError> },
-    WritePositionUnconfirmed { bytes: usize, error: io::Error },
+    OwnershipCommitPending {
+        object: u64,
+        error: Box<FsError>,
+    },
+    WritePositionUnconfirmed {
+        bytes: usize,
+        error: io::Error,
+    },
 }
 
 impl fmt::Display for FsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Vfs(error) => write!(formatter, "{error}"),
             Self::Io(error) => write!(formatter, "Filesystem error: {error}"),
             Self::InvalidRoot => write!(formatter, "An absolute non-drive-root data directory without traversal is required."),
             Self::InvalidPath => write!(formatter, "Only virtual Unix paths are allowed; traversal, device names and host path syntax are refused."),
             Self::AccessDenied(message) => write!(formatter, "{message}"),
             Self::Link(path) => write!(formatter, "Symbolic link or reparse point refused: {}", path.display()),
+            Self::SystemProviderConflict(path) => write!(formatter, "Default virtual provider conflicts with existing host contents at {path}; nothing was adopted or removed."),
             Self::UnmarkedRoot => write!(formatter, "Dedicated data-root marker is missing or invalid."),
             Self::NotDirectory => write!(formatter, "The requested directory does not exist or is not a directory."),
             Self::NotFile => write!(formatter, "The requested path is not a regular file."),
@@ -125,7 +153,13 @@ impl fmt::Display for FsError {
             Self::LogMaintenanceBlocked { generation, error } => write!(formatter, "No new log record was published; cleanup of generation {generation} is blocked: {error:?}."),
             Self::LogAppendUnconfirmed { progress, error } => write!(formatter, "Log payload progress {progress:?}, record commit unconfirmed: {error:?}; recover before retrying."),
             Self::ServiceOwnedPath => write!(formatter, "This managed path can only be written by its system service."),
+            Self::DirectoryModeOnFile => write!(formatter, "Sticky permission requires a managed directory; regular files support virtual setuid/setgid."),
             Self::InvalidOwnershipRecord => write!(formatter, "Ownership protocol is invalid; contents were preserved."),
+            Self::AccessCommitPending(error) => write!(formatter, "Access/namespace transaction pending: {error}; recover before retrying."),
+            Self::ResourceQuota => write!(formatter, "Application/cache logical byte or object quota exceeded."),
+            Self::ResourceInactive => write!(formatter, "Application/cache resource is being removed or evicted; writes refused."),
+            Self::ResourceDetached => write!(formatter, "Resource file generation is detached; writes refused."),
+            Self::TaskScopeMismatch => write!(formatter, "Task scope belongs to another root or account."),
             Self::OwnershipCapacity => write!(formatter, "Ownership catalog or object capacity exceeded."),
             Self::OwnershipIdentityExhausted => write!(formatter, "Persistent object identities or revisions are exhausted; reuse was refused."),
             Self::UnownedOwnershipStore => write!(formatter, "Ownership store marker is missing or invalid; no adoption was performed."),
@@ -143,17 +177,26 @@ impl fmt::Display for FsError {
 
 pub(super) fn host_path_is_busy(error: &io::Error) -> bool {
     #[cfg(windows)]
-    { std::matches!(error.raw_os_error(), Some(32 | 33)) }
+    {
+        std::matches!(error.raw_os_error(), Some(32 | 33))
+    }
     #[cfg(not(windows))]
-    { let _ = error; false }
+    {
+        let _ = error;
+        false
+    }
 }
 
 impl std::error::Error for FsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(error) | Self::BusyPath(error) | Self::TransactionLockUnavailable(error)
-            | Self::AtomicReplaceUnavailable(error) | Self::AtomicPublishUnavailable(error)
-            | Self::AtomicRenameUnavailable(error) | Self::WritePositionUnconfirmed { error, .. } => Some(error),
+            Self::Io(error)
+            | Self::BusyPath(error)
+            | Self::TransactionLockUnavailable(error)
+            | Self::AtomicReplaceUnavailable(error)
+            | Self::AtomicPublishUnavailable(error)
+            | Self::AtomicRenameUnavailable(error)
+            | Self::WritePositionUnconfirmed { error, .. } => Some(error),
             Self::OwnershipCommitPending { error, .. } => Some(error.as_ref()),
             _ => None,
         }
@@ -162,13 +205,19 @@ impl std::error::Error for FsError {
 
 impl From<io::Error> for FsError {
     fn from(error: io::Error) -> Self {
-        if host_path_is_busy(&error) { Self::BusyPath(error) } else { Self::Io(error) }
+        if host_path_is_busy(&error) {
+            Self::BusyPath(error)
+        } else {
+            Self::Io(error)
+        }
     }
 }
 
 pub enum EntryKind {
+    Device,
     Directory,
     File,
+    Symlink,
     BlockedLink,
 }
 pub struct Entry {
@@ -209,4 +258,10 @@ pub(crate) enum TransactionFault {
 pub enum RecoveryOutcome {
     NoStore,
     Inspected { discarded: usize, preserved: usize },
+}
+
+impl From<super::vfs::Error> for FsError {
+    fn from(error: super::vfs::Error) -> Self {
+        Self::Vfs(error)
+    }
 }

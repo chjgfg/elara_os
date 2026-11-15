@@ -34,7 +34,7 @@ fn invalid_case_is_preflighted_and_session_controls_in_arms_cannot_read_password
                 &root,
                 &user,
                 &mut Context::new(VirtualPath::root()),
-                &["-c".into(), std::format!("touch /tmp/forbidden; {body}")]
+                &["-c".into(), std::format!("touch /root/forbidden; {body}")]
             )
             .is_err(),
             "{body}"
@@ -42,11 +42,11 @@ fn invalid_case_is_preflighted_and_session_controls_in_arms_cannot_read_password
     }
     let text = transcript_in(
         &root,
-        "touch /tmp/forbidden; case x in x) su root ;; esac\necho alive\nexit 0\n",
+        "touch /root/forbidden; case x in x) su root ;; esac\necho alive\nexit 0\n",
     );
     assert!(text.contains("session controls require a standalone command"));
     assert!(text.contains("alive\n"));
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
 }
 #[test]
 fn case_depth_and_comment_parentheses_in_substitution_are_bounded_and_correct() {

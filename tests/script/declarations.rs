@@ -101,13 +101,13 @@ fn ifs_field_burst_hits_the_limit_before_commands_can_have_side_effects() {
         &mut Context::new(VirtualPath::root()),
         &[
             "-c".into(),
-            std::format!("IFS=,; X='{}'; touch /tmp/forbidden $X", ",".repeat(2000)),
+            std::format!("IFS=,; X='{}'; touch /root/forbidden $X", ",".repeat(2000)),
         ],
     )
     .unwrap();
     assert!(String::from_utf8_lossy(&report.stderr)
         .contains("word expansion exceeds its argument budget"));
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
 }
 
 #[test]
@@ -136,9 +136,10 @@ fn prompt_keeps_exit_trap_until_explicit_exit_or_eof() {
     );
     assert!(text.contains("body\ncleanup:7\nBye.\n"), "{text}");
     assert!(!text.contains("forbidden"));
-    let text = crate::support::transcript_in(&root, "trap 'touch /tmp/cleaned' EXIT\n");
+    let text = crate::support::transcript_in(&root, "trap 'touch /root/cleaned; touch /tmp/task-cleaned' EXIT\n");
     assert!(text.ends_with("Bye.\n"));
-    assert!(root.root().join("tmp/cleaned").exists());
+    assert!(root.root().join("root/cleaned").exists());
+    assert!(!root.root().join("tmp/task-cleaned").exists());
 }
 
 #[test]
@@ -146,8 +147,8 @@ fn aggregate_expansions_are_bounded_before_commands_and_loop_bodies() {
     let (root, user) = fixture();
     let values = "a ".repeat(600);
     for body in [
-        "touch /tmp/forbidden $X $X",
-        "for item in $X $X; do touch /tmp/forbidden; break; done",
+        "touch /root/forbidden $X $X",
+        "for item in $X $X; do touch /root/forbidden; break; done",
     ] {
         let report = run(
             &root,
@@ -158,7 +159,7 @@ fn aggregate_expansions_are_bounded_before_commands_and_loop_bodies() {
         .unwrap();
         assert!(String::from_utf8_lossy(&report.stderr)
             .contains("command expansion exceeds 1024 arguments"));
-        assert!(!root.root().join("tmp/forbidden").exists());
+        assert!(!root.root().join("root/forbidden").exists());
     }
     let part = "x".repeat(3300);
     let expression = "\"$P\"".repeat(10);
@@ -187,7 +188,7 @@ fn direct_runtime_api_checks_arguments_before_cloning_or_executing() {
         }
     }
     let (root, user) = fixture();
-    let ast = elara_os::script::parser::parse("touch /tmp/forbidden").unwrap();
+    let ast = elara_os::script::parser::parse("touch /root/forbidden").unwrap();
     for parameters in [vec![String::new(); 1025], vec!["x".repeat(65537)]] {
         let report = elara_os::script::runtime::execute(
             &ast,
@@ -199,7 +200,7 @@ fn direct_runtime_api_checks_arguments_before_cloning_or_executing() {
         );
         assert_eq!(report.status, 2);
         assert_eq!(report.steps, 0);
-        assert!(!root.root().join("tmp/forbidden").exists());
+        assert!(!root.root().join("root/forbidden").exists());
     }
 }
 

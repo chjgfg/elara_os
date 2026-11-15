@@ -7,11 +7,15 @@ use cap_std::ambient_authority;
 #[cfg(windows)]
 use cap_std::fs::MetadataExt;
 use cap_std::fs::{Dir, Metadata, OpenOptions};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::{fs, matches};
 
 pub struct DataRoot {
+    pub(super) runtime_executions: super::runtime_executions::SharedExecutions,
+    pub(super) runtime_jobs: super::runtime_jobs::SharedJobObservations,
+    pub(super) vfs: std::sync::Arc<super::vfs::Registry>,
+    pub(super) family: std::sync::Arc<()>,
     pub(super) root: PathBuf,
     pub(super) dir: Dir,
     pub(super) log_store_cache: std::sync::OnceLock<Dir>,
@@ -19,43 +23,49 @@ pub struct DataRoot {
     pub(super) bypass_write_policy: bool,
     #[cfg(test)]
     pub(super) transaction_fault: super::types::TransactionFault,
+    #[cfg(test)]
+    pub(super) access_fault: super::access::AccessFault,
+    #[cfg(test)]
+    pub(super) host_open_fault: super::host_locks::HostOpenFault,
 }
 
 impl DataRoot {
     pub fn open(root: &Path) -> Result<Self, FsError> {
-        if !root.is_absolute()
-            || root.parent().is_none()
-            || root
-                .components()
-                .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-        {
-            return Err(FsError::InvalidRoot);
-        }
-        #[cfg(windows)]
-        if !matches!(root.components().next(), Some(Component::Prefix(prefix))
-            if matches!(prefix.kind(), std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)))
-        {
-            return Err(FsError::InvalidRoot);
-        }
+        super::validate_root_location(root)?;
         check_plain_path(root)?;
         if !root.is_dir() {
             return Err(FsError::NotDirectory);
         }
         let root = root.canonicalize()?;
         let dir = Dir::open_ambient_dir(&root, ambient_authority())?;
+        Self::from_granted_directory(root, dir)
+    }
+
+    /// Bootstrap transfers its pinned directory here; no ambient re-open.
+    pub(crate) fn from_granted_directory(root: PathBuf, dir: Dir) -> Result<Self, FsError> {
+        super::validate_root_location(&root)?;
         let marker = Path::new(ROOTFS_DEFAULTS.marker_filename);
         match dir.symlink_metadata(marker) {
             Ok(metadata) if linked(&metadata) => return Err(FsError::Link(root.join(marker))),
+            Ok(metadata) if !metadata.is_file() => return Err(FsError::UnmarkedRoot),
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(FsError::UnmarkedRoot)
             }
             Err(error) => return Err(error.into()),
         }
-        if dir.read(marker)?.as_slice() != ROOTFS_DEFAULTS.marker_contents {
+        let mut bytes = Vec::new();
+        dir.open(marker)?
+            .take((ROOTFS_DEFAULTS.marker_contents.len() + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.as_slice() != ROOTFS_DEFAULTS.marker_contents {
             return Err(FsError::UnmarkedRoot);
         }
         let data = Self {
+            runtime_jobs: Default::default(),
+            runtime_executions: Default::default(),
+            family: std::sync::Arc::new(()),
+            vfs: std::sync::Arc::new(super::vfs::Registry::default()),
             root,
             dir,
             log_store_cache: std::sync::OnceLock::new(),
@@ -63,10 +73,15 @@ impl DataRoot {
             bypass_write_policy: false,
             #[cfg(test)]
             transaction_fault: super::types::TransactionFault::None,
+            #[cfg(test)]
+            access_fault: super::access::AccessFault::None,
+            #[cfg(test)]
+            host_open_fault: Default::default(),
         };
         for name in ROOTFS_DEFAULTS.directories {
-            data.validate_directory(name)?;
+            data.validate_directory_unchecked(name)?;
         }
+        data.install_system_providers()?;
         Ok(data)
     }
 
@@ -74,10 +89,21 @@ impl DataRoot {
     /// synchronization domain. Never re-authorize an ambient host path.
     pub(super) fn clone_file_domain(&self) -> Result<Self, FsError> {
         Ok(Self {
-            root: self.root.clone(), dir: self.dir.try_clone()?,
+            runtime_jobs: self.runtime_jobs.clone(),
+            runtime_executions: self.runtime_executions.clone(),
+            vfs: self.vfs.clone(),
+            family: self.family.clone(),
+            root: self.root.clone(),
+            dir: self.dir.try_clone()?,
             log_store_cache: std::sync::OnceLock::new(),
-            #[cfg(test)] bypass_write_policy: self.bypass_write_policy,
-            #[cfg(test)] transaction_fault: self.transaction_fault,
+            #[cfg(test)]
+            bypass_write_policy: self.bypass_write_policy,
+            #[cfg(test)]
+            transaction_fault: self.transaction_fault,
+            #[cfg(test)]
+            access_fault: self.access_fault,
+            #[cfg(test)]
+            host_open_fault: self.host_open_fault,
         })
     }
 
@@ -116,6 +142,12 @@ impl DataRoot {
     }
 
     pub fn validate_directory(&self, virtual_path: &str) -> Result<(), FsError> {
+        if self.ownership_requires_actor(virtual_path)? {
+            return Err(FsError::OwnershipContextRequired);
+        }
+        self.validate_directory_unchecked(virtual_path)
+    }
+    pub(super) fn validate_directory_unchecked(&self, virtual_path: &str) -> Result<(), FsError> {
         let path = self.resolve(virtual_path)?;
         let lookup = if path.as_os_str().is_empty() {
             Path::new(".")
@@ -130,7 +162,13 @@ impl DataRoot {
     }
 
     pub fn list(&self, virtual_path: &str) -> Result<Vec<Entry>, FsError> {
-        self.validate_directory(virtual_path)?;
+        if self.ownership_requires_actor(virtual_path)? {
+            return Err(FsError::OwnershipContextRequired);
+        }
+        self.list_unchecked(virtual_path)
+    }
+    pub(super) fn list_unchecked(&self, virtual_path: &str) -> Result<Vec<Entry>, FsError> {
+        self.validate_directory_unchecked(virtual_path)?;
         let path = self.resolve(virtual_path)?;
         let lookup = if path.as_os_str().is_empty() {
             Path::new(".")
@@ -183,7 +221,9 @@ impl DataRoot {
     }
 
     pub fn read_file(&self, virtual_path: &str, limit: u64) -> Result<Vec<u8>, FsError> {
-        if self.ownership_requires_actor(virtual_path)? { return Err(FsError::OwnershipContextRequired); }
+        if self.ownership_requires_actor(virtual_path)? {
+            return Err(FsError::OwnershipContextRequired);
+        }
         let path = self.resolve(virtual_path)?;
         if !self.dir.metadata(&path)?.is_file() {
             return Err(FsError::NotFile);
@@ -208,6 +248,7 @@ impl DataRoot {
         self.resolve_new(virtual_path)?;
         self.ensure_write_allowed(virtual_path)?;
         let _lock = self.namespace_guard()?;
+        self.ensure_write_allowed(virtual_path)?;
         let path = self.resolve_new(virtual_path)?;
         self.dir.create_dir(path)?;
         Ok(())
@@ -217,6 +258,7 @@ impl DataRoot {
         self.resolve_new(virtual_path)?;
         self.ensure_write_allowed(virtual_path)?;
         let _lock = self.namespace_guard()?;
+        self.ensure_write_allowed(virtual_path)?;
         let path = self.resolve_new(virtual_path)?;
         self.dir
             .open_with(path, OpenOptions::new().write(true).create_new(true))?;
@@ -295,6 +337,7 @@ pub(super) fn visible_name(name: &std::ffi::OsStr) -> bool {
         && !name.eq_ignore_ascii_case(ROOTFS_DEFAULTS.transaction_directory)
         && !name.eq_ignore_ascii_case(crate::config::PRIVATE_LOG_DIRECTORY)
         && !name.eq_ignore_ascii_case(crate::config::PRIVATE_OWNER_DIRECTORY)
+        && !name.eq_ignore_ascii_case(super::access::DIRECTORY_MARKER)
 }
 
 pub(super) fn linked(metadata: &Metadata) -> bool {

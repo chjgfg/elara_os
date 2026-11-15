@@ -97,7 +97,13 @@ fn open_stream_io_seek_stat_truncate_and_sync_delegate_to_real_handles() {
 #[test]
 fn duplicate_shares_position_and_generation_reuse_rejects_stale_tokens() {
     let (root, user) = fixture();
-    fs::write(root.root().join("tmp/a"), b"abcdef").unwrap();
+    root.create_owned_file(
+        &user,
+        "/tmp/a",
+        b"abcdef",
+        elara_os::filesystem::VirtualMode::new(0o600).unwrap(),
+    )
+    .unwrap();
     let mut session = FdSession::new(user.uid).unwrap();
     let first = token(call(&mut session, &root, &user, &["open", "/tmp/a", "rw"]));
     let duplicate = token(call(&mut session, &root, &user, &["dup", &first]));
@@ -128,7 +134,13 @@ fn duplicate_shares_position_and_generation_reuse_rejects_stale_tokens() {
 #[test]
 fn positioned_io_preserves_position_and_append_rejects_writeat() {
     let (root, user) = fixture();
-    fs::write(root.root().join("tmp/a"), b"abcdef").unwrap();
+    root.create_owned_file(
+        &user,
+        "/tmp/a",
+        b"abcdef",
+        elara_os::filesystem::VirtualMode::new(0o600).unwrap(),
+    )
+    .unwrap();
     let mut session = FdSession::new(user.uid).unwrap();
     let h = token(call(&mut session, &root, &user, &["open", "/tmp/a", "rw"]));
     assert_eq!(
@@ -159,7 +171,13 @@ fn positioned_io_preserves_position_and_append_rejects_writeat() {
 #[test]
 fn readonly_writeonly_and_open_modes_have_no_silent_permission_fallback() {
     let (root, user) = fixture();
-    fs::write(root.root().join("tmp/a"), b"old").unwrap();
+    root.create_owned_file(
+        &user,
+        "/tmp/a",
+        b"old",
+        elara_os::filesystem::VirtualMode::new(0o600).unwrap(),
+    )
+    .unwrap();
     let mut session = FdSession::new(user.uid).unwrap();
     let read = token(call(
         &mut session,
@@ -195,7 +213,13 @@ fn readonly_writeonly_and_open_modes_have_no_silent_permission_fallback() {
 #[test]
 fn full_table_does_not_truncate_target_and_read_limits_do_not_consume_data() {
     let (root, user) = fixture();
-    fs::write(root.root().join("tmp/a"), b"old").unwrap();
+    root.create_owned_file(
+        &user,
+        "/tmp/a",
+        b"old",
+        elara_os::filesystem::VirtualMode::new(0o600).unwrap(),
+    )
+    .unwrap();
     let mut session = FdSession::with_limit(user.uid, 1).unwrap();
     let h = token(call(&mut session, &root, &user, &["open", "/tmp/a", "rw"]));
     fails(&mut session, &root, &user, &["open", "/tmp/a", "truncate"]);
@@ -334,4 +358,16 @@ fn close_and_drop_release_handles_but_do_not_delete_user_data() {
         call(&mut session, &root, &user, &["write", &h, "keep"]);
     }
     assert_eq!(fs::read(root.root().join("tmp/keep")).unwrap(), b"keep");
+}
+
+#[test]
+fn opened_identity_command_compares_live_handles_and_rejects_stale_tokens() {
+    let text = transcript("fd open /root/identity create\nfd dup 0:1\nfd same 0:1 1:1\nfd open /root/identity rw\nfd same 0:1 2:1\nfd open /root/other create\nfd same 0:1 3:1\nfd close 1:1\nfd same 0:1 1:1\nexit 0\n");
+    assert_eq!(text.matches("SameObject\n").count(), 2, "{text}");
+    assert_eq!(text.matches("DifferentObject\n").count(), 1, "{text}");
+    assert_eq!(text.matches("Error:").count(), 1, "{text}");
+    assert!(
+        text.contains("closed, stale or belongs to another table"),
+        "{text}"
+    );
 }

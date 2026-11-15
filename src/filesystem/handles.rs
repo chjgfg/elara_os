@@ -71,13 +71,48 @@ impl HandleTable {
     }
 
     pub fn open_as(
-        &mut self, data: &DataRoot, user: &crate::users::Account, path: &str, mode: FileMode,
+        &mut self,
+        data: &DataRoot,
+        user: &crate::users::Account,
+        path: &str,
+        mode: FileMode,
     ) -> Result<FileHandle, FsError> {
         self.reserve_slot()?;
         let file = data.open_file_as(user, path, mode)?;
         self.insert(file)
     }
 
+    pub fn open_with_options(
+        &mut self,
+        data: &DataRoot,
+        user: &crate::users::Account,
+        path: &str,
+        mode: FileMode,
+        options: super::CreationOptions<'_>,
+    ) -> Result<FileHandle, FsError> {
+        self.reserve_slot()?;
+        let file = data.open_file_with_options(user, path, mode, options)?;
+        self.insert(file)
+    }
+    pub fn open_shared_with_options(
+        &mut self,
+        data: &DataRoot,
+        user: &crate::users::Account,
+        path: &str,
+        mode: FileMode,
+        share: super::vfs::ShareMode,
+        options: super::CreationOptions<'_>,
+    ) -> Result<FileHandle, FsError> {
+        self.reserve_slot()?;
+        let file = data.open_file_shared_with_options(user, path, mode, share, options)?;
+        self.insert(file)
+    }
+    pub fn lock(&self, handle: FileHandle, mode: super::vfs::LockMode) -> Result<(), FsError> {
+        self.file(handle)?.lock(mode)
+    }
+    pub fn unlock(&self, handle: FileHandle) -> Result<(), FsError> {
+        self.file(handle)?.unlock()
+    }
     pub fn insert(&mut self, file: OpenFile) -> Result<FileHandle, FsError> {
         self.reserve_slot()?;
         let index = self
@@ -182,6 +217,13 @@ impl HandleTable {
     }
     pub fn limit(&self) -> usize {
         self.limit
+    }
+    pub fn compare_identity(
+        &self,
+        left: FileHandle,
+        right: FileHandle,
+    ) -> Result<super::ObjectBinding, FsError> {
+        self.file(left)?.compare_identity(self.file(right)?)
     }
     pub fn info(&self, handle: FileHandle) -> Result<FileInfo, FsError> {
         self.file(handle)?.info()

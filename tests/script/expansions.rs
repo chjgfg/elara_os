@@ -48,11 +48,11 @@ fn parameter_defaults_assignments_alternates_and_lengths_preserve_semantics() {
 #[test]
 fn unused_defaults_do_not_run_side_effects_and_required_parameters_fail() {
     let (root, user) = fixture();
-    let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), "X=set; echo \"${X:-$(touch /tmp/forbidden)}\"; echo \"${Y:+$(touch /tmp/forbidden)}\"; echo \"${Y:?required parameter}\"".into()]).unwrap();
+    let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), "X=set; echo \"${X:-$(touch /root/forbidden)}\"; echo \"${Y:+$(touch /root/forbidden)}\"; echo \"${Y:?required parameter}\"".into()]).unwrap();
     assert_eq!(report.stdout, b"set\n\n");
     assert_ne!(report.status, 0);
     assert!(String::from_utf8_lossy(&report.stderr).contains("required parameter"));
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
 }
 #[test]
 fn parameter_trim_uses_quote_aware_shortest_and_longest_patterns() {
@@ -76,15 +76,15 @@ fn replacement_rejects_unsupported_wildcards_and_overflow_before_redirect_side_e
         &root,
         &user,
         &mut Context::new(VirtualPath::root()),
-        &["-c".into(), "touch /tmp/forbidden; echo ${X/a*/Z}".into()]
+        &["-c".into(), "touch /root/forbidden; echo ${X/a*/Z}".into()]
     )
     .is_err());
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
     let part = "r".repeat(3300);
     let words = "\"$P\"".repeat(10);
-    let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), std::format!("P='{part}'; R=$(printf '%s' {words}); X=xx; echo \"${{X//x/$R}}\" > /tmp/forbidden")]).unwrap();
+    let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), std::format!("P='{part}'; R=$(printf '%s' {words}); X=xx; echo \"${{X//x/$R}}\" > /root/forbidden")]).unwrap();
     assert!(String::from_utf8_lossy(&report.stderr).contains("64 KiB output limit exceeded"));
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
 }
 
 #[test]
@@ -101,13 +101,13 @@ fn invalid_expansions_are_preflighted_before_any_file_side_effect() {
                 &root,
                 &user,
                 &mut Context::new(VirtualPath::root()),
-                &["-c".into(), std::format!("touch /tmp/forbidden; {suffix}")]
+                &["-c".into(), std::format!("touch /root/forbidden; {suffix}")]
             )
             .is_err(),
             "{suffix}"
         );
     }
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
 }
 #[test]
 fn substitution_still_obeys_output_encoding_and_file_authorization() {

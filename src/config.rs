@@ -221,9 +221,9 @@ impl Config {
         {
             return Err("ELARA_DATA_ROOT must be a nonempty, unquoted path.".into());
         }
-        Ok(Self {
-            data_root: PathBuf::from(value),
-        })
+        let data_root = PathBuf::from(value);
+        crate::filesystem::validate_root_location(&data_root).map_err(|error| error.to_string())?;
+        Ok(Self { data_root })
     }
 }
 
@@ -249,5 +249,13 @@ mod tests {
     fn duplicate_or_unknown_keys_are_rejected() {
         assert!(Config::parse("ELARA_DATA_ROOT=a\nELARA_DATA_ROOT=b\n").is_err());
         assert!(Config::parse("OTHER=a\n").is_err());
+    }
+
+    #[test]
+    fn configuration_rejects_bad_root_syntax_without_initialization() {
+        for value in ["relative/data", "C:/../data", "C:/Windows/ElaraData", "//./PhysicalDrive0"] {
+            assert!(Config::parse(&std::format!("ELARA_DATA_ROOT={value}
+")).is_err(), "{value}");
+        }
     }
 }

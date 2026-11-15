@@ -10,6 +10,7 @@ use std::time::SystemTime;
 pub enum ObjectKind {
     File,
     Directory,
+    Symlink,
     BlockedLink,
     Other,
 }

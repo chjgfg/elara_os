@@ -204,7 +204,7 @@ impl Source {
         let path = cwd.resolve(path).map_err(display_error)?;
         permissions::check(user, &path, Access::Read).map_err(display_error)?;
         let file = root
-            .open_file(&path.to_string(), FileMode::READ)
+            .open_file_as(user, &path.to_string(), FileMode::READ)
             .map_err(display_error)?;
         let remaining = file.info().map_err(display_error)?.length;
         Ok(Self {

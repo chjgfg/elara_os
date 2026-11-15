@@ -110,6 +110,33 @@ fn run_in_scope<'scope, 'env, R: BufRead, W: Write, S: SecretReader>(
     writeln!(output, "Type 'help' for commands.")?;
     let mut current = VirtualPath::root();
     let mut script_context = script::Context::new(current.clone());
+    match data_root.recover_tasks() {
+        Ok(report) if report.deferred != 0 => writeln!(
+            output,
+            "Warning: task recovery deferred for {} objects.",
+            report.deferred
+        )?,
+        Ok(_) => {}
+        Err(error) => {
+            writeln!(output, "Startup refused: task recovery: {error}")?;
+            return output.flush().map(|_| 2);
+        }
+    }
+    match data_root.recover_resources() {
+        Ok(report) if report.deferred != 0 => writeln!(
+            output,
+            "Warning: application/cache recovery deferred for {} objects.",
+            report.deferred
+        )?,
+        Ok(_) => {}
+        Err(error) => {
+            writeln!(
+                output,
+                "Startup refused: application/cache recovery: {error}"
+            )?;
+            return output.flush().map(|_| 2);
+        }
+    }
     let resources = match script::shared::Resources::new(user.uid, logger.clone(), TASK_CAPACITY) {
         Ok(resources) => resources,
         Err(error) => {
@@ -250,6 +277,25 @@ fn run_in_scope<'scope, 'env, R: BufRead, W: Write, S: SecretReader>(
                     writeln!(output, "rmdir  - remove empty directories")?;
                     writeln!(
                         output,
+                        "owned  - managed files: create/read/write/append/mv/rm/chmod/stat"
+                    )?;
+                    writeln!(output, "vfs    - internal memory/pseudo mounts, inode/link/rename, quotas, snapshots, save/load (vfs help)")?;
+                    writeln!(
+                        output,
+                        "app/cache - persistent registration, quotas, uninstall/clear (app help)"
+                    )?;
+                    writeln!(
+                        output,
+                        "umask  - show/set session creation mask (default 0077)"
+                    )?;
+                    writeln!(
+                        output,
+                        "chmod/chgrp/getfacl/setfacl - virtual directory/file access metadata"
+                    )?;
+                    writeln!(output, "groupadd/groupmem/groups - persistent shared groups (management root-only)")?;
+                    writeln!(output, "tmp    - NEW task-scoped objects under /tmp are reclaimed at task/session exit")?;
+                    writeln!(
+                        output,
                         "mv     - atomically move a file/tree to a new name (no overwrite)"
                     )?;
                     writeln!(
@@ -258,7 +304,7 @@ fn run_in_scope<'scope, 'env, R: BufRead, W: Write, S: SecretReader>(
                     )?;
                     writeln!(
                         output,
-                        "stat   - inspect host-backed metadata for one virtual path"
+                        "stat   - inspect backend metadata for one virtual path"
                     )?;
                     writeln!(
                         output,
@@ -329,6 +375,11 @@ fn run_in_scope<'scope, 'env, R: BufRead, W: Write, S: SecretReader>(
                         output,
                         "source - run a script retaining its variables/functions/directory"
                     )?;
+                    writeln!(
+                        output,
+                        "id     - show virtual real/effective/saved user and group identities"
+                    )?;
+                    writeln!(output, "exec   - replace this virtual script: exec <managed-file> [args]; requires x, never launches host programs")?;
                     writeln!(
                         output,
                         "fd     - owner-bound file descriptors; use 'fd help'"
@@ -524,6 +575,22 @@ fn run_in_scope<'scope, 'env, R: BufRead, W: Write, S: SecretReader>(
                                     "Closed {closed} file handles on identity change."
                                 )?;
                             }
+                            {
+                                let mut modules = script::shared::SharedModules::new(
+                                    data_root, &user, &resources,
+                                );
+                                match script_context.finish_task(&mut modules) {
+                                    Ok(report) if report.deferred != 0 => writeln!(
+                                        output,
+                                        "Warning: old task cleanup deferred for {} objects.",
+                                        report.deferred
+                                    )?,
+                                    Err(error) => {
+                                        writeln!(output, "Warning: old task cleanup: {error}")?
+                                    }
+                                    _ => {}
+                                }
+                            }
                             user = account;
                             if permissions::check(&user, &current, Access::Read).is_err() {
                                 current = VirtualPath::root();
@@ -559,6 +626,21 @@ fn run_in_scope<'scope, 'env, R: BufRead, W: Write, S: SecretReader>(
         Ok(script_context.status())
     })();
     jobs.shutdown().map_err(std::io::Error::other)?;
+    resources
+        .switch_owner(user.uid)
+        .map_err(std::io::Error::other)?;
+    {
+        let mut modules = script::shared::SharedModules::new(data_root, &user, &resources);
+        match script_context.finish_task(&mut modules) {
+            Ok(report) if report.deferred != 0 => writeln!(
+                output,
+                "Warning: task cleanup deferred for {} objects.",
+                report.deferred
+            )?,
+            Err(error) => writeln!(output, "Warning: task cleanup: {error}")?,
+            _ => {}
+        }
+    }
     result
 }
 
@@ -912,7 +994,7 @@ mod tests {
         assert!(text.contains("Authentication failed."));
         assert!(!text.contains("top secret"));
         assert!(root.join("home/alice/mine.txt").is_file());
-        assert!(root.join("tmp/scratch.txt").is_file());
+        assert!(!root.join("tmp/scratch.txt").exists()); // Session-owned temporary name was reclaimed.
         assert!(!root.join("etc/evil").exists());
         assert!(!root.join("usr/evil").exists());
         assert!(text.ends_with("Bye.\n"));

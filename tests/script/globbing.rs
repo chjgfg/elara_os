@@ -69,14 +69,21 @@ fn glob_does_not_enumerate_forbidden_directories_or_modify_data_on_expansion_fai
         &root,
         &guest,
         &mut Context::new(VirtualPath::root()),
-        &["-c".into(), "echo /root/*; touch /tmp/a /root/*".into()],
+        &["-c".into(), "echo /root/*; touch /home/globguest/a /root/*".into()],
     )
     .unwrap();
     assert!(report.stdout.is_empty());
     assert!(
         String::from_utf8_lossy(&report.stderr).contains("Permission denied: cannot read /root")
     );
-    assert!(!root.root().join("tmp/a").exists());
+    assert!(!root.root().join("home/globguest/a").exists());
+    // The witness must be writable by this actor, not absent due to a second denial.
+    let control = run(
+        &root, &guest, &mut Context::new(VirtualPath::root()),
+        &["-c".into(), "touch /home/globguest/a".into()],
+    ).unwrap();
+    assert_eq!(control.status, 0, "{control:?}");
+    assert!(root.root().join("home/globguest/a").is_file());
 }
 #[test]
 fn glob_has_an_explicit_path_limit_before_command_side_effects() {
@@ -89,11 +96,11 @@ fn glob_has_an_explicit_path_limit_before_command_side_effects() {
         &root,
         &user,
         &mut Context::new(VirtualPath::root()),
-        &["-c".into(), "touch /tmp/forbidden /tmp/many/*".into()],
+        &["-c".into(), "touch /root/forbidden /tmp/many/*".into()],
     )
     .unwrap();
     assert!(String::from_utf8_lossy(&report.stderr).contains("glob expansion exceeds 1024 paths"));
-    assert!(!root.root().join("tmp/forbidden").exists());
+    assert!(!root.root().join("root/forbidden").exists());
 }
 #[test]
 fn tilde_uses_home_without_field_splitting_and_cannot_change_identity() {
@@ -112,5 +119,5 @@ fn tilde_uses_home_without_field_splitting_and_cannot_change_identity() {
     assert_eq!(report.stdout, b"/home/a b\n~/literal ~\nroot\n");
     let report = execute("echo ~");
     assert_eq!(report.stdout, b"/root\n");
-    assert!(elara_os::script::parser::parse("touch /tmp/forbidden; echo ~someone").is_err());
+    assert!(elara_os::script::parser::parse("touch /root/forbidden; echo ~someone").is_err());
 }

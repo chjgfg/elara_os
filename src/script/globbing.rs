@@ -36,7 +36,7 @@ pub fn expand(
         if pattern::has_wildcards(part)? {
             for (directory, display) in paths {
                 permissions::check(user, &directory, Access::Read).map_err(|e| e.to_string())?;
-                let mut cursor = match root.open_directory(&directory.to_string()) {
+                let mut cursor = match root.open_directory_as(user, &directory.to_string()) {
                     Ok(cursor) => cursor,
                     Err(FsError::NotFound | FsError::NotDirectory) => continue,
                     Err(FsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -91,7 +91,7 @@ pub fn expand(
     let mut output = Vec::new();
     let mut bytes = 0usize;
     for (path, mut display) in paths {
-        let stat = match root.stat(&path.to_string()) {
+        let stat = match root.stat_as(user, &path.to_string()) {
             Ok(stat) => stat,
             Err(FsError::NotFound) => continue,
             Err(FsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,

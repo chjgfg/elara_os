@@ -72,7 +72,10 @@ fn rename_refuses_overwrite_protected_system_and_descendant_destinations() {
         Err(FsError::InvalidPath)
     ));
     #[cfg(windows)]
-    assert!(matches!(data.rename("/home/tree", "/HOME/TREE/child"), Err(FsError::InvalidPath)));
+    assert!(matches!(
+        data.rename("/home/tree", "/HOME/TREE/child"),
+        Err(FsError::InvalidPath)
+    ));
     assert_eq!(data.read_file("/home/a", 8).unwrap(), b"A");
     assert_eq!(data.read_file("/home/b", 8).unwrap(), b"B");
 }

@@ -44,10 +44,10 @@ fn real_process_copies_moves_diagnoses_and_refuses_overwrite_and_escape() {
     let config = fixture.join("fixture.env");
     fs::write(&config, format!("ELARA_DATA_ROOT={}\n", data.display())).unwrap();
     let output = process(&config,
-        "\ncd /tmp\nsh -c 'printf abc > \"source file\"'\ncp \"source file\" copy\nmv copy moved\nstat moved\nfind moved\ndu moved\ncp \"source file\" moved\nmv \"source file\" moved\ncp moved /usr/refused\ncp moved C:/outside\nsh -c 'cp moved scriptcopy; mv scriptcopy scriptmoved; cat scriptmoved'\nexit\n");
+        "\ncd /root\nsh -c 'printf abc > \"source file\"'\ncp \"source file\" copy\nmv copy moved\nstat moved\nfind moved\ndu moved\ncp \"source file\" moved\nmv \"source file\" moved\ncp moved /usr/refused\ncp moved C:/outside\nsh -c 'cp moved scriptcopy; mv scriptcopy scriptmoved; cat scriptmoved'\nexit\n");
     println!("=== ACTUAL FILESYSTEM COMMAND OUTPUT ===\n{output}");
     assert!(
-        output.contains("path: /tmp/moved\nkind: File\nlength: 3\n"),
+        output.contains("path: /root/moved\nkind: File\nlength: 3\n"),
         "{output}"
     );
     assert!(output.contains("logical_file_bytes: 3\nfiles: 1\n"));
@@ -56,9 +56,9 @@ fn real_process_copies_moves_diagnoses_and_refuses_overwrite_and_escape() {
     assert!(output.contains("System directory is read-only"));
     assert!(output.contains("Host path syntax and control characters are refused."));
     assert!(output.contains("Bye."));
-    assert_eq!(fs::read(data.join("tmp/source file")).unwrap(), b"abc");
-    assert_eq!(fs::read(data.join("tmp/moved")).unwrap(), b"abc");
-    assert_eq!(fs::read(data.join("tmp/scriptmoved")).unwrap(), b"abc");
-    assert!(!data.join("tmp/copy").exists());
+    assert_eq!(fs::read(data.join("root/source file")).unwrap(), b"abc");
+    assert_eq!(fs::read(data.join("root/moved")).unwrap(), b"abc");
+    assert_eq!(fs::read(data.join("root/scriptmoved")).unwrap(), b"abc");
+    assert!(!data.join("root/copy").exists());
     assert!(!data.join("usr/refused").exists());
 }

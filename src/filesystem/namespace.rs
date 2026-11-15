@@ -14,13 +14,24 @@ pub struct RenameReceipt {
 
 fn is_same_or_descendant(destination: &Path, source: &Path) -> bool {
     let source_len = source.components().count();
-    if destination.components().count() < source_len { return false; }
-    destination.components().zip(source.components()).all(|(left, right)| {
-        #[cfg(windows)]
-        { left.as_os_str().to_string_lossy().eq_ignore_ascii_case(&right.as_os_str().to_string_lossy()) }
-        #[cfg(not(windows))]
-        { left == right }
-    })
+    if destination.components().count() < source_len {
+        return false;
+    }
+    destination
+        .components()
+        .zip(source.components())
+        .all(|(left, right)| {
+            #[cfg(windows)]
+            {
+                left.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+            }
+            #[cfg(not(windows))]
+            {
+                left == right
+            }
+        })
 }
 
 impl DataRoot {
@@ -32,7 +43,24 @@ impl DataRoot {
         self.resolve_new(destination)?;
         self.ensure_write_allowed(destination)?;
         let _lock = self.namespace_guard()?;
+        let source_key = super::ownership_model::key(source)?;
+        let access = self.load_access_catalog()?;
+        if access.directories.keys().any(|p| {
+            p == &source_key
+                || p.strip_prefix(&source_key)
+                    .is_some_and(|r| r.starts_with("/"))
+        }) {
+            return Err(FsError::OwnershipContextRequired);
+        }
+        if let Some(store) = self.existing_owner_store()? {
+            let catalog = self.load_owner_catalog(&store)?;
+            let prefix = std::format!("{source_key}/");
+            if catalog.entries.keys().any(|path| path.starts_with(&prefix)) {
+                return Err(FsError::OwnershipContextRequired);
+            }
+        }
         let (source, metadata) = self.resolve_existing(source)?;
+        self.ensure_write_allowed(destination)?;
         let destination = self.resolve_new(destination)?;
         if !metadata.is_file() && !metadata.is_dir() {
             return Err(FsError::NotFile);

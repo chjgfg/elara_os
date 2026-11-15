@@ -7,7 +7,8 @@
 - **原始问题**：一个完整的操作系统都有哪些模块？
 - **整理日期**：2026-11-06。
 - **内容来源**：本次对话中的操作系统模块说明，整理为项目文档；未进行外部规范逐条核验。
-- **当前状态**：Cargo/Rust宿主命令行原型v0.1.3，运行时数据根由`.env`的`ELARA_DATA_ROOT`指定，构建在项目`target`。共同提示符/脚本入口、嵌套sh/source、常用语言限定子集、文件桥及FD已接通；M5支持适用内建的真正并发流式管道、显式有界回退及`& / jobs / bg / fg / wait %ID / kill`合作式作业。常用命令清单34项，额外内建/别名见[命令账本](docs/ubuntu-style-commands.md)。后台使用真实共享模块与实际Account；退出/EOF/身份切换取消并join旧作业，关闭旧FD保代际。密码使用固定版本rpassword原生Rust接口，隐藏失败不回退可见输入。最新稳定全量**169+145+6=320通过**，**严格Clippy仍有并行FS三处lint未过**，详见[脚本验收](docs/shell-scripting.md#8-验收记录)。不是独立内核或OS级安全沙箱，Ubuntu/Linux原生未测。
+- **当前状态**：Rust 宿主命令行原型 v0.1.3，非独立内核或 OS 级安全沙箱。共同 Shell/脚本入口、流式管道、作用域作业、受管文件权限与生命周期已接入；文件系统新增内部 inode/VFS、链接、锁、镜像与伪文件系统。当前能力和验收唯一依据为[文件系统账本](docs/filesystem.md#internal-vfs-2026-11-14)，历史测试数量不代表当前源码已全绿。Ubuntu/Linux 原生及真实断电未测。
+- **最新增量**：[自有块存储](docs/filesystem.md#block-store-2026-11-15)已贯通增量COW、有限缓存、碎片分配、只读恢复/修复及真实进程重启；[认证加密checkpoint](docs/filesystem.md#sealed-images-2026-11-15)核心/脚本/真实进程专项通过；[运行时去重与冻结overlay](docs/filesystem.md#dedup-overlay-2026-11-15)已接命令并通过专项。历史完整基线543项（331核心、182脚本、30其他；严格Clippy及默认构建通过）；[快照属性持久化](docs/filesystem.md#persistent-snapshot-2026-11-15)已通过专项、严格Clippy及默认构建；[跨内部挂载链接](docs/filesystem.md#cross-mount-links-2026-11-15)与[proc资源租约目录](docs/filesystem.md#proc-task-leases-2026-11-15)已通过专项及默认程序实跑；租约不是JobState或宿主PID。[真实作用域作业目录](docs/filesystem.md#proc-runtime-jobs-2026-11-15)及动态状态旧FD快照修复已通过83项相关测试、默认程序实跑和当时543项全量回归。[打开对象身份](docs/filesystem.md#opened-identity-2026-11-15)专项和默认程序实跑通过；[受管Host协作锁](docs/filesystem.md#host-locks-2026-11-15)V3出生协议、双见证身份及按冲突恢复27项专项通过，默认程序复测亦通过，全目标560项通过（346核心、183脚本、31其他），严格Clippy与默认构建通过。[Host目录项与硬链接](docs/filesystem.md#host-hardlinks-2026-11-15)已通过27项专项（含真实双进程）、严格Clippy、默认构建及默认程序独立重启实跑，迁移后573项全目标回归通过（358核心、183脚本、32其他）；上述560项为迁移前冻结证据。[Host虚拟符号链接与目录共用模型](docs/filesystem.md#host-symlinks-2026-11-15)已通过15项专项、严格Clippy、默认build和默认程序独立重启实跑，586项全目标回归通过（370核心、183脚本、33其他）。[Host覆盖rename](docs/filesystem.md#host-rename-2026-11-15)已通过37项相关测试、真实双进程、严格Clippy与默认build，596项全目标回归与默认程序独立双进程通过。后续[legacy任务及前台执行观察](docs/filesystem.md#proc-foreground-2026-11-15)正在扩展验收，尚未使用旧全量结果冒充验证。网络FS与live overlay未完成。不操作宿主磁盘、挂载或实际数据根。
 - **权威入口**：本文件负责项目说明、实际实现状态与文档索引；详细通用模块说明以 [完整操作系统模块总览](docs/operating-system-modules.md) 为唯一权威正文。后续新增实现或文档时，应同步更新入口与状态，不将设计设想写成已实现功能。
 - **范围说明**：本文描述通用操作系统的模块概览，不表示 ElaraOS 必须一次性实现所有模块。文末开发顺序是建议，不是已经确认或完成的里程碑。
 
@@ -15,7 +16,7 @@
 
 - [完整操作系统模块总览](docs/operating-system-modules.md)：25 个主题章节，展开层次、子模块职责、依赖关系、四条典型协作路径与完整性边界，另附术语、官方核验入口和修订记录。
 - [初始化后命令与模块开发对照](docs/ubuntu-style-commands.md)：按 Ubuntu 常见命令组织当前支持命令的实际用法、未支持语法、待实现命令与模块映射；其他会话先读当前能力与验收记录，再结合模块总览选择一个开发增量。
-- [文件系统实现与验收](docs/filesystem.md)：写入分类、能力边界、对象/句柄、原子提交与恢复；mv/cp/stat/find/du命令桥、受管日志V2限额轮转及对象归属增量。具体FS交付以该账本为准，不把Shell验收当作完整临时生命周期或自有磁盘层完成。
+- [文件系统实现与验收](docs/filesystem.md)：单一能力/验收账本，含权限、归属、内部挂载、inode/链接、镜像持久化、恢复边界和后续层未完成项。
 - [文件句柄命令](docs/file-descriptors.md)：`fd open/read/write/seek/stat/dup/sync/close` 等薄适配，SLOT:GEN 仅当前会话有效；共享脚本表、身份切换关闭能力、实际写入进度与 tests/ 验收。
 - [Shell 脚本](docs/shell-scripting.md)：共同词法/AST/求值、常用语法、嵌套调用、并发流式阶段与typed fallback、作用域合作式作业、资源/身份边界及真实程序验收；FS能力只复用接口。
 - [设计原则：无垃圾与流畅](docs/design-principles.md)：七条跨模块约束——系统目录只读、可写目录有所有者和生命周期、临时文件不留用户目录、应用自包含、任务 QoS 类别、配置是文件且变更是事务、不提供清理工具。**实现任何写入、任务或资源相关功能前必须先读**；已实现约束与待落实设计分开标注，不将目录分类视为完整生命周期管理。
@@ -55,7 +56,12 @@ Cargo 在项目 `target` 目录构建；程序启动后读取 `.env`，再初始
 - [src/lib.rs](src/lib.rs)：真实程序与 `tests/` 共用的模块库入口，测试不复制业务实现。
 - [src/main.rs](src/main.rs)：读取配置、调用模块库中的 Rust 初始化、进入命令行。
 - [src/config.rs](src/config.rs)：集中配置。`ROOTFS_DEFAULTS` 保存系统默认目录布局、根标记文件名及内容；`Config` 严格解析 `.env`，没有缺省数据根或静默回退。
-- [src/initialization.rs](src/initialization.rs)：新数据根创建、已授权目录补全、重复初始化校验；结果以枚举表达。
+- [src/initialization.rs](src/initialization.rs)：固定目录能力内创建/补全；prepare_open 将根能力与初始化枚举结果一起返回。
+- [src/filesystem/host_boundary.rs](src/filesystem/host_boundary.rs)：配置、初始化和打开共用的宿主根位置安全门。
+- [tests/host_boundary_cli.rs](tests/host_boundary_cli.rs)：真实启动拒绝、根外哨兵和未知临时数据保留验收；当前完整408项中2/2通过（2.71s）。
+- [default ACL 权威增量](docs/filesystem.md#default-acl-2026-11-09)：继承/出生权限事务、V1/V2兼容、命令与成本；15项库专项已通过；2项真实CLI已通过（35.03s），default ACL快照378/378通过。
+- [目录setgid与sticky阻塞记录](docs/filesystem.md#directory-setgid-2026-11-09)：GID/子目录位继承专项及真实CLI通过；修订后完整390/390通过，旧388/390失败及原两秒判据保留；历史sticky审批阻塞保留；本轮已接入统一命名门，[当前sticky增量](docs/filesystem.md#sticky-2026-11-09)及见证补强408/408已验收，执行特殊位已由后续执行身份增量替代；当前 VFS 及剩余层见单一账本。
+- [tests/filesystem/default_acl.rs](tests/filesystem/default_acl.rs)、[tests/default_acl_cli.rs](tests/default_acl_cli.rs)：对应不变量/故障/守卫对照与真实进程验收，不复用旧通过计数。
 - [src/filesystem.rs](src/filesystem.rs)：数据根验证、受限路径、目录验证、只读列举，以及文件创建/读取/写入/追加/删除后端。
 - [src/virtual_path.rs](src/virtual_path.rs)：虚拟命名空间内路径归一化与根上越界拒绝，Shell 与文件访问后端共用。
 - [src/command_line.rs](src/command_line.rs)：旧独立单行分词器，保留纯函数测试；不再参与普通提示符分发，实际前端为 `src/script/interactive.rs`。
@@ -96,6 +102,8 @@ Cargo 在项目 `target` 目录构建；程序启动后读取 `.env`，再初始
 
 ### 初始化与数据边界
 
+宿主影响的九类允许范围、实际入口守卫和待运行验收统一见[宿主影响硬边界](docs/filesystem.md#host-impact-boundary-2026-11-09)。自有格式只操作普通镜像，内部挂载不操作宿主卷；这些后端仍未实现。
+
 当前 `.env`：
 
 ```dotenv
@@ -104,13 +112,13 @@ ELARA_DATA_ROOT=D:/os
 
 M 盘在当前机器上不存在；`D:/os` 是此前新建的专用目录，没有映射盘符或修改分区。
 
-Rust 初始化允许创建新目录或接管空目录；拒绝接管无项目标记的非空目录。已标记目录只补缺失目录，不覆盖已有文件。目录布局包括 Ubuntu 风格的 `root/tmp/usr/etc/var/home/boot/dev/proc/sys` 等，完整清单以 `src/config.rs` 中的 `ROOTFS_DEFAULTS` 为准。
+Rust 初始化只创建所选数据根本身，父目录必须已存在，不自动创建根外祖先目录；允许新目录或空目录；拒绝接管无项目标记的非空目录。已标记目录只补缺失目录，不覆盖已有文件。目录布局包括 Ubuntu 风格的 `root/tmp/usr/etc/var/home/boot/dev/proc/sys` 等，完整清单以 `src/config.rs` 中的 `ROOTFS_DEFAULTS` 为准。
 
 - 运行时写入只用于配置的数据根及其初始化目录、标记。`.env` 是项目中的必要只读输入。
 - `proc/sys/dev` 是项目数据目录，不挂载或映射宿主资源；`snap` 目录不表示实现了 Snap。
 - `bin/lib/sbin` 为普通目录，不照搬宿主软链接。
 - 不创建 `swapfile`、`lost+found` 或 `*.usr-is-merged`。
-- 拒绝越界路径、宿主盘符路径、Windows 设备名、alternate data stream、符号链接与 reparse point。
+- 拒绝越界路径、宿主盘符路径、Windows 设备名、alternate data stream、宿主原生符号链接与 reparse point；受管虚拟链接是独立的inode元数据，不取消宿主边界。
 - 不执行宿主命令，不改启动配置、注册表、服务、驱动、分区，不建立网络连接。
 - **目录与能力句柄约束不等于 OS 级安全隔离**：路径替换保护、系统只读与事务恢复由文件系统模块实施；宿主原型仍不能限制恶意修改后的程序或宿主其他进程，不声称是完整 OS 安全沙箱。
 - 运行时数据根与构建工具行为分开：Cargo 只负责项目 `target` 构建，不读取 `.env`；虚拟根只由运行中的 Rust 程序初始化。
@@ -122,7 +130,8 @@ Rust 初始化允许创建新目录或接管空目录；拒绝接管无项目标
 - **此前已核验**：五个外部脚本已撤回，Rust 初始化中自动写 Cargo 配置的逻辑已撤回。
 - **2026-11-07 已验证**：`cargo test --offline` 中 73 个单元测试、1 个 Windows ConPTY 集成测试全部通过。原生终端测试确认两次密码输入不回显、普通命令输入回显恢复、退出码 0、shadow/日志无测试密码明文。输入流测试同时覆盖一次 Enter 跳过、确认前 EOF、不匹配不修改、拒绝权限操作不消费后续命令。细节见[命令账本 §8.1](docs/ubuntu-style-commands.md#81-原生-rust-密码输入与计数修正验收2026-11-07当前有效)。
 - **此前全量快照（2026-11-08，190项）**：`cargo test --offline --target-dir target/script-build -- --test-threads=1` 已通过：133 个模块单元测试、54 个 `tests/script/` 功能测试、1 个 FD 真实进程、1 个脚本真实进程、1 个 ConPTY 测试，合计 190。`cargo clippy --offline --target-dir target/script-build --all-targets -- -D warnings` 通过。FD 14 项包含在 54 中，文件系统批次已包含在 133 内，不重复累计；详见[句柄命令专题](docs/file-descriptors.md)。旧 128 等保留为历史快照。
-- **本轮稳定全量（2026-11-08）**：`cargo test --offline --target-dir target/shell-build -- --test-threads=1 --nocapture`：169模块+145脚本+6实际进程/ConPTY，**320全过，exit0**；源码/测试前后一致。真实程序验证2MiB→2097152、作业暂停/恢复与取消130、退出7；流式/消费/取消必要性对照成立。**严格Clippy未过**：并行FS的ownership.rs/ownership_model.rs三处lint，未修改其业务/守卫或放宽门槛。五步限定功能的验收及剩余质量门见[脚本账本](docs/shell-scripting.md#9-已批准开发顺序)，FS状态仍由[文件系统账本](docs/filesystem.md)维护。275/236/190只作历史，不累计。
+- **此前稳定全量（2026-11-08）**：`cargo test --offline --target-dir target/shell-build -- --test-threads=1 --nocapture`：169模块+145脚本+6实际进程/ConPTY，**320全过，exit0**；源码/测试前后一致。真实程序验证2MiB→2097152、作业暂停/恢复与取消130、退出7；流式/消费/取消必要性对照成立。**严格Clippy未过**：并行FS的ownership.rs/ownership_model.rs三处lint，未修改其业务/守卫或放宽门槛。五步限定功能的验收及剩余质量门见[脚本账本](docs/shell-scripting.md#9-已批准开发顺序)，FS状态仍由[文件系统账本](docs/filesystem.md)维护。275/236/190只作历史，不累计。
+- **2026-11-09 受管句柄增量**：fd 已接账号/对象权限/归属绑定，并贯通跨命令读取与受管 cp/mv；七项既有 Clippy 告警等价修复。最新正式验收和并行/串行证据边界由[文件系统单一账本](docs/filesystem.md#owned-open-2026-11-09)维护；目录权限、umask、共享组/access ACL 和任务临时生命周期的最新实现/阻塞状态见[本轮文件系统账本](docs/filesystem.md#directory-access-task-2026-11-09)，未沿用332项通过结论。
 - **未验证**：Ubuntu/Linux 原生运行、快速粘贴竞态、所有 Windows 终端宿主的兼容性；Windows ConPTY 结果不外推为所有终端都已验证。
 
 ## 1. 完整操作系统的边界

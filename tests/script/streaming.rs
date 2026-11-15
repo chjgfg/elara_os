@@ -76,13 +76,13 @@ fn module_progress_and_atomic_redirection_use_typed_buffered_fallbacks() {
         &mut Context::new(VirtualPath::root()),
         &[
             "-c".into(),
-            "fd open /tmp/shared create; printf hi | fd write 0:1; printf copy | cat > /tmp/output"
+            "fd open /root/shared create; printf hi | fd write 0:1; printf copy | cat > /root/output"
                 .into(),
         ],
     )
     .unwrap();
-    assert_eq!(fs::read(root.root().join("tmp/shared")).unwrap(), b"hi");
-    assert_eq!(fs::read(root.root().join("tmp/output")).unwrap(), b"copy");
+    assert_eq!(fs::read(root.root().join("root/shared")).unwrap(), b"hi");
+    assert_eq!(fs::read(root.root().join("root/output")).unwrap(), b"copy");
     assert!(matches!(
         report.pipelines[0].strategy,
         Strategy::Buffered {

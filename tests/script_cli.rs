@@ -89,7 +89,7 @@ fn actual_shell_runs_files_checks_syntax_and_retains_source_context() {
         "{core}"
     );
     fs::write(data.join("tmp/stream-large"), vec![b'x'; 2 * 1024 * 1024]).unwrap();
-    let flow = run(&config,"\ncat /tmp/stream-large | wc -c\nsh -c 'cd /tmp; echo background; exit 3' &\njobs\nwait %1\necho $?\nsleep 1 &\nkill -STOP %2\njobs\nbg %2\nfg %2\nsh -c 'sleep 10; touch /tmp/forbidden-cancel' &\nkill -TERM %3\nwait %3\necho $?\nexit 0\n");
+    let flow = run(&config,"\ncat /tmp/stream-large | wc -c\nsh -c 'cd /tmp; echo background; exit 3' &\njobs\nwait %1\necho $?\nsleep 1 &\nkill -STOP %2\njobs\nbg %2\nfg %2\nsh -c 'sleep 10; touch /root/forbidden-cancel' &\nkill -TERM %3\nwait %3\necho $?\nexit 0\n");
     println!("=== ACTUAL STREAM/JOB OUTPUT ===\n{flow}");
     assert!(flow.contains("2097152\n"), "{flow}");
     assert!(flow.contains("background\n[1] exited 3\n"), "{flow}");
@@ -97,7 +97,7 @@ fn actual_shell_runs_files_checks_syntax_and_retains_source_context() {
     assert!(flow.contains("[2] resume requested\n"), "{flow}");
     assert!(flow.contains("[3] cancelled 130\n"), "{flow}");
     assert!(flow.ends_with("130\nBye.\n"), "{flow}");
-    assert!(!data.join("tmp/forbidden-cancel").exists());
+    assert!(!data.join("root/forbidden-cancel").exists());
     // The same executable accepts prompt syntax directly and returns exit N.
     let mut child = Command::new(env!("CARGO_BIN_EXE_elara-host"))
         .arg(&config)
@@ -106,12 +106,12 @@ fn actual_shell_runs_files_checks_syntax_and_retains_source_context() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(b"\nX=direct\nprintf '%s' \"$X\" > /tmp/direct\ncat < /tmp/direct | wc -c\nfalse || echo recovered\nexit 7\necho forbidden_after_exit\n").unwrap();
+    child.stdin.take().unwrap().write_all(b"\nX=direct\nprintf '%s' \"$X\" > /root/direct\ncat < /root/direct | wc -c\nfalse || echo recovered\nexit 7\necho forbidden_after_exit\n").unwrap();
     let output = child.wait_with_output().unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
     println!("=== ACTUAL UNIFIED PROMPT OUTPUT ===\n{text}");
     assert_eq!(output.status.code(), Some(7));
     assert!(text.contains("6\nrecovered\nBye.\n"), "{text}");
     assert!(!text.contains("forbidden_after_exit"));
-    assert_eq!(fs::read(data.join("tmp/direct")).unwrap(), b"direct");
+    assert_eq!(fs::read(data.join("root/direct")).unwrap(), b"direct");
 }

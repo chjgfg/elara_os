@@ -90,7 +90,10 @@ fn empty_open_directory_is_busy_for_remove_and_drop_releases_it() {
     let data = DataRoot::open(&root).unwrap();
     data.create_directory("/home/empty").unwrap();
     let cursor = data.open_directory("/home/empty").unwrap();
-    assert!(matches!(data.remove_directory("/home/empty"), Err(FsError::BusyPath(_))));
+    assert!(matches!(
+        data.remove_directory("/home/empty"),
+        Err(FsError::BusyPath(_))
+    ));
     assert!(root.join("home/empty").is_dir());
     drop(cursor);
     data.remove_directory("/home/empty").unwrap();

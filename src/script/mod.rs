@@ -1,4 +1,7 @@
 //! Script entry point; filesystem and other system modules are used through their interfaces.
+mod access;
+mod vfs;
+mod resources;
 pub mod arithmetic;
 pub mod control;
 mod count;
@@ -23,7 +26,10 @@ use crate::users::Account;
 pub use runtime::Context;
 use std::format;
 
+pub(super) enum PreparedIdentity { Inherit, Executed(Account) }
+
 pub(super) struct Prepared {
+    pub identity: PreparedIdentity,
     pub ast: parser::List,
     pub parameters: Vec<String>,
     pub check: bool,
@@ -100,12 +106,39 @@ pub(super) fn prepare(
         }
     };
     Ok(Prepared {
+        identity: PreparedIdentity::Inherit,
         ast: parser::parse(&source)?,
         parameters,
         check,
         explicit_parameters,
     })
 }
+/// Explicit virtual execution: unlike sh/source, require a managed x-authorized
+/// image. Parse the captured bytes, never reopen the pathname after authorization.
+pub(super) fn prepare_executable(
+    root: &DataRoot, user: &Account, context: &Context, args: &[String],
+) -> Result<Prepared, lexer::Error> {
+    if args.len() > 1024 || args.iter().map(String::len).sum::<usize>() > lexer::MAX_BYTES {
+        return Err(lexer::Error::new(0, "script argument limit exceeded"));
+    }
+    let [path, rest @ ..] = args else {
+        return Err(lexer::Error::new(0, "Usage: exec <managed-file> [args...] (virtual scripts only)"));
+    };
+    if path.starts_with('-') {
+        return Err(lexer::Error::new(0, "exec does not accept options or host programs"));
+    }
+    let resolved = context.cwd.resolve(path).map_err(|e| lexer::Error::new(0, e.to_string()))?;
+    let image = root.load_executable_as(user, &resolved.to_string(), lexer::MAX_BYTES as u64)
+        .map_err(|e| lexer::Error::new(0, e.to_string()))?;
+    let source = std::str::from_utf8(image.bytes())
+        .map_err(|e| lexer::Error::new(0, format!("executable must be UTF-8: {e}")))?;
+    Ok(Prepared {
+        ast: parser::parse(source)?, parameters: parameters(path, rest),
+        identity: PreparedIdentity::Executed(image.execution_account(root, user).map_err(|e| lexer::Error::new(0, e.to_string()))?),
+        check: false, explicit_parameters: true,
+    })
+}
+
 fn parameters(path: &str, args: &[String]) -> Vec<String> {
     let mut parameters = Vec::new();
     parameters.push(path.into());
@@ -125,7 +158,7 @@ fn read(
     permissions::check(user, &path, Access::Read)
         .map_err(|e| lexer::Error::new(0, e.to_string()))?;
     let bytes = root
-        .read_file(&path.to_string(), lexer::MAX_BYTES as u64)
+        .read_file_as(user, &path.to_string(), lexer::MAX_BYTES as u64)
         .map_err(|e| lexer::Error::new(0, e.to_string()))?;
     if bytes.len() > lexer::MAX_BYTES {
         return Err(lexer::Error::new(0, "script exceeds 64 KiB"));

@@ -22,6 +22,19 @@ impl DataRoot {
     }
 
     pub(super) fn ensure_write_allowed(&self, virtual_path: &str) -> Result<WriteClass, FsError> {
+        let class = self.ensure_write_class(virtual_path)?;
+        if self.ownership_requires_actor(virtual_path)? {
+            return Err(FsError::OwnershipContextRequired);
+        }
+        if std::matches!(
+            class,
+            WriteClass::RuntimeState | WriteClass::Application | WriteClass::Cache
+        ) {
+            return Err(FsError::OwnershipContextRequired);
+        }
+        Ok(class)
+    }
+    pub(super) fn ensure_write_class(&self, virtual_path: &str) -> Result<WriteClass, FsError> {
         let path = VirtualPath::strict(virtual_path).map_err(|_| FsError::InvalidPath)?;
         if path.as_relative().as_os_str().is_empty() {
             return Err(FsError::ProtectedPath);
@@ -44,9 +57,6 @@ impl DataRoot {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-        }
-        if self.ownership_requires_actor(&text)? {
-            return Err(FsError::OwnershipContextRequired);
         }
         match class {
             WriteClass::SystemReadOnly => Err(FsError::ReadOnlySystemPath),

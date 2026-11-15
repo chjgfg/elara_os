@@ -30,16 +30,54 @@ impl JobId {
         self.0
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JobState {
-    Running,
-    PauseRequested,
-    Stopped,
-    Resuming,
-    Cancelling,
-    Cancelled,
-    Exited(u8),
-    Panicked,
+pub use crate::filesystem::RuntimeJobState as JobState;
+use crate::filesystem::{FsError, JobObservation};
+struct ObservedJob {
+    control: Control,
+    terminal: Mutex<Option<JobState>>,
+}
+impl ObservedJob {
+    fn finish(&self, state: JobState) {
+        if let Ok(mut terminal) = self.terminal.lock() {
+            *terminal = Some(state);
+        }
+    }
+}
+impl JobObservation for ObservedJob {
+    fn state(&self) -> Result<JobState, FsError> {
+        let terminal = self
+            .terminal
+            .lock()
+            .map_err(|_| crate::filesystem::vfs::Error::Busy)?;
+        if let Some(state) = *terminal {
+            return Ok(state);
+        }
+        let flags = self.control.snapshot()?;
+        Ok(if flags.cancel_requested {
+            JobState::Cancelling
+        } else if flags.pause_requested
+            && flags.workers != 0
+            && flags.workers == flags.stopped_workers
+        {
+            JobState::Stopped
+        } else if flags.pause_requested {
+            JobState::PauseRequested
+        } else if flags.stopped_workers != 0 {
+            JobState::Resuming
+        } else {
+            JobState::Running
+        })
+    }
+}
+struct ObserveExit(Arc<ObservedJob>);
+impl Drop for ObserveExit {
+    fn drop(&mut self) {
+        if let Ok(mut terminal) = self.0.terminal.lock() {
+            if terminal.is_none() {
+                *terminal = Some(JobState::Panicked);
+            }
+        }
+    }
 }
 pub struct Snapshot {
     pub id: JobId,
@@ -74,6 +112,7 @@ enum Phase {
     Panicked,
 }
 struct Record<'scope> {
+    observation: Arc<ObservedJob>,
     label: String,
     control: Control,
     phase: Phase,
@@ -143,23 +182,7 @@ impl<'scope, 'env> JobTable<'scope, 'env> {
             } => JobState::Cancelled,
             Phase::Finished { report, .. } => JobState::Exited(report.status),
             Phase::Panicked => JobState::Panicked,
-            Phase::Running => {
-                let flags = record.control.snapshot().map_err(|e| e.to_string())?;
-                if flags.cancel_requested {
-                    JobState::Cancelling
-                } else if flags.pause_requested
-                    && flags.workers != 0
-                    && flags.workers == flags.stopped_workers
-                {
-                    JobState::Stopped
-                } else if flags.pause_requested {
-                    JobState::PauseRequested
-                } else if flags.stopped_workers != 0 {
-                    JobState::Resuming
-                } else {
-                    JobState::Running
-                }
-            }
+            Phase::Running => record.observation.state().map_err(|e| e.to_string())?,
         })
     }
     pub fn spawn(
@@ -175,13 +198,13 @@ impl<'scope, 'env> JobTable<'scope, 'env> {
             label,
             budget,
         } = request;
-        self.authorize(user.uid)?;
+        self.authorize(user.session_uid())?;
         let mut registry = self
             .core
             .registry
             .lock()
             .map_err(|_| "job registry poisoned")?;
-        self.authorize(user.uid)?;
+        self.authorize(user.session_uid())?;
         if self.core.closing.load(Ordering::Acquire) {
             return Err("job environment is closing".into());
         }
@@ -203,10 +226,17 @@ impl<'scope, 'env> JobTable<'scope, 'env> {
                 return Err("module context does not support scoped workers".into())
             }
         };
+        let observation = Arc::new(ObservedJob {
+            control: control.clone(),
+            terminal: Mutex::new(None),
+        });
+        root.observe_job(user.session_uid(), id.number(), observation.clone())
+            .map_err(|e| e.to_string())?;
         registry.next = next;
         registry.records.insert(
             id,
             Record {
+                observation: observation.clone(),
                 label,
                 control: control.clone(),
                 phase: Phase::Running,
@@ -218,6 +248,7 @@ impl<'scope, 'env> JobTable<'scope, 'env> {
         let spawned = std::thread::Builder::new()
             .name(format!("elara-job-{}", id.0))
             .spawn_scoped(self.core.scope, move || {
+                let _exit = ObserveExit(observation.clone());
                 let mut context = context;
                 let mut report = runtime::execute_job(
                     &program,
@@ -241,6 +272,11 @@ impl<'scope, 'env> JobTable<'scope, 'env> {
                 }
                 if let Ok(mut registry) = jobs.core.registry.lock() {
                     if let Some(record) = registry.records.get_mut(&id) {
+                        observation.finish(if cancelled {
+                            JobState::Cancelled
+                        } else {
+                            JobState::Exited(report.status)
+                        });
                         record.phase = Phase::Finished { report, cancelled };
                     }
                     jobs.core.changed.notify_all();
@@ -425,5 +461,45 @@ impl<'scope, 'env> JobTable<'scope, 'env> {
         let count = self.shutdown()?;
         self.complete_owner_switch(uid)?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use std::{assert_eq, panic};
+    #[test]
+    fn proc_jobs_observer_requires_pause_ack_and_keeps_terminal_state() {
+        let control = Control::new();
+        let worker = control.worker().unwrap();
+        let source = Arc::new(ObservedJob {
+            control: control.clone(),
+            terminal: Mutex::new(None),
+        });
+        assert_eq!(source.state().unwrap(), JobState::Running);
+        control.request_pause().unwrap();
+        assert_eq!(source.state().unwrap(), JobState::PauseRequested);
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(move || worker.checkpoint());
+            assert!(control.wait_stopped(Duration::from_secs(1)).unwrap());
+            assert_eq!(source.state().unwrap(), JobState::Stopped);
+            control.cancel().unwrap();
+            assert_eq!(source.state().unwrap(), JobState::Cancelling);
+            assert!(handle.join().unwrap().is_err());
+        });
+        source.finish(JobState::Cancelled);
+        drop(ObserveExit(source.clone()));
+        assert_eq!(source.state().unwrap(), JobState::Cancelled);
+        let panic_source = Arc::new(ObservedJob {
+            control: Control::new(),
+            terminal: Mutex::new(None),
+        });
+        let observed = panic_source.clone();
+        assert!(std::panic::catch_unwind(move || {
+            let _exit = ObserveExit(observed);
+            panic!("test worker panic");
+        })
+        .is_err());
+        assert_eq!(panic_source.state().unwrap(), JobState::Panicked);
     }
 }

@@ -10,40 +10,40 @@ use std::{assert, assert_eq, assert_ne, fs, matches};
 fn shell_and_scripts_move_copy_and_inspect_relative_quoted_paths() {
     let (root, _) = fixture();
     let text = transcript_in(&root,
-        "cd /tmp\nsh -c 'printf abc > \"source file\"'\ncp \"source file\" copy\nmv copy moved\nstat moved\nfind .\ndu moved\nsh -c 'cp moved scriptcopy; mv scriptcopy scriptmoved; cat scriptmoved'\nexit\n");
+        "cd /root\nsh -c 'printf abc > \"source file\"'\ncp \"source file\" copy\nmv copy moved\nstat moved\nfind .\ndu moved\nsh -c 'cp moved scriptcopy; mv scriptcopy scriptmoved; cat scriptmoved'\nexit\n");
     assert!(
-        text.contains("path: /tmp/moved\nkind: File\nlength: 3\n"),
+        text.contains("path: /root/moved\nkind: File\nlength: 3\n"),
         "{text}"
     );
-    assert!(text.contains("/tmp/moved\n"));
+    assert!(text.contains("/root/moved\n"));
     assert!(text.contains("logical_file_bytes: 3\nfiles: 1\ndirectories: 0\n"));
     assert!(text.contains("physical_usage: UnavailableOnHostBackend"));
     assert_eq!(
-        fs::read(root.root().join("tmp/source file")).unwrap(),
+        fs::read(root.root().join("root/source file")).unwrap(),
         b"abc"
     );
-    assert_eq!(fs::read(root.root().join("tmp/moved")).unwrap(), b"abc");
+    assert_eq!(fs::read(root.root().join("root/moved")).unwrap(), b"abc");
     assert_eq!(
-        fs::read(root.root().join("tmp/scriptmoved")).unwrap(),
+        fs::read(root.root().join("root/scriptmoved")).unwrap(),
         b"abc"
     );
-    assert!(!root.root().join("tmp/copy").exists());
-    assert!(!root.root().join("tmp/scriptcopy").exists());
+    assert!(!root.root().join("root/copy").exists());
+    assert!(!root.root().join("root/scriptcopy").exists());
 }
 
 #[test]
 fn command_copy_is_independent_and_existing_targets_are_not_overwritten() {
     let (root, user) = fixture();
-    fs::write(root.root().join("tmp/source"), b"original").unwrap();
-    fs::write(root.root().join("tmp/occupied"), b"keep").unwrap();
+    root.create_owned_file(&user, "/root/source", b"original", elara_os::filesystem::VirtualMode::new(0o600).unwrap()).unwrap();
+    fs::write(root.root().join("root/occupied"), b"keep").unwrap();
     let mut context = Context::new(VirtualPath::root());
     let report = run(&root, &user, &mut context, &["-c".into(),
-        "cp /tmp/source /tmp/copy; printf changed > /tmp/source; cp /tmp/source /tmp/occupied || echo copy-refused; mv /tmp/source /tmp/occupied || echo move-refused".into()]).unwrap();
+        "cp /root/source /root/copy; printf changed > /root/source; cp /root/source /root/occupied || echo copy-refused; mv /root/source /root/occupied || echo move-refused".into()]).unwrap();
     assert_eq!(report.status, 0);
-    assert_eq!(fs::read(root.root().join("tmp/copy")).unwrap(), b"original");
-    assert_eq!(fs::read(root.root().join("tmp/occupied")).unwrap(), b"keep");
+    assert_eq!(fs::read(root.root().join("root/copy")).unwrap(), b"original");
+    assert_eq!(fs::read(root.root().join("root/occupied")).unwrap(), b"keep");
     assert!(String::from_utf8_lossy(&report.stdout).contains("copy-refused\nmove-refused\n"));
-    assert!(root.root().join("tmp/source").exists());
+    assert!(root.root().join("root/source").exists());
 }
 
 #[test]
@@ -53,15 +53,18 @@ fn commands_keep_system_readonly_and_user_authorization_gates() {
     fs::write(root.root().join("root/secret"), b"secret").unwrap();
     users::add_user(&root, &user, "cmdguest", "password").unwrap();
     let text = transcript_in(&root,
-        "cp /tmp/source /usr/new\nmv /tmp/source /usr/new\nsu cmdguest\ncp /root/secret /tmp/leak\nstat /root/secret\nfind /root\ndu /root\nexit\n");
+        "cp /tmp/source /usr/new\nmv /tmp/source /usr/new\nsu cmdguest\ncp /root/secret /home/cmdguest/leak\nstat /root/secret\nfind /root\ndu /root\nexit\n");
     assert!(text.contains("System directory is read-only"));
     assert!(text.contains("Permission denied"));
     assert!(!root.root().join("usr/new").exists());
-    assert!(!root.root().join("tmp/leak").exists());
+    assert!(!root.root().join("home/cmdguest/leak").exists());
     assert_eq!(
         fs::read(root.root().join("root/secret")).unwrap(),
         b"secret"
     );
+    // Remove only the forbidden source: the same guest can publish this witness.
+    transcript_in(&root, "su cmdguest\ncp /tmp/source /home/cmdguest/leak\nexit\n");
+    assert_eq!(fs::read(root.root().join("home/cmdguest/leak")).unwrap(), b"source");
 }
 
 #[test]

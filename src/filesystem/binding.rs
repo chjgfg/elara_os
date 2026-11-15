@@ -18,7 +18,7 @@ fn kind(error: TryLockError) -> io::ErrorKind {
         TryLockError::Error(error) => error.kind(),
     }
 }
-fn controlled_binding(first: &File, second: &File) -> ObjectBinding {
+pub(super) fn controlled_binding(first: &File, second: &File) -> ObjectBinding {
     // A pre-existing lock cannot be mistaken for our own conflict.
     if let Err(error) = second.try_lock() {
         return ObjectBinding::Unconfirmed(kind(error));
@@ -66,14 +66,20 @@ impl DataRoot {
     /// Binding probe for regular files. Unsupported/readonly/busy hosts are
     /// explicit unconfirmed results, never an equality or permission grant.
     /// This is a short cooperative lock probe, not an OS-wide sandbox.
-    pub fn compare_file_objects(&self, first: &str, second: &str) -> Result<ObjectBinding, FsError> {
+    pub fn compare_file_objects(
+        &self,
+        first: &str,
+        second: &str,
+    ) -> Result<ObjectBinding, FsError> {
         let guard = self.namespace_guard()?;
         let first = self.resolve(first)?;
         let second = self.resolve(second)?;
         self.compare_relative_objects(&first, &second, &guard)
     }
     pub(super) fn compare_relative_objects(
-        &self, first: &std::path::Path, second: &std::path::Path,
+        &self,
+        first: &std::path::Path,
+        second: &std::path::Path,
         guard: &super::transaction::NamespaceGuard<'_>,
     ) -> Result<ObjectBinding, FsError> {
         guard.require_root(self)?;
@@ -92,5 +98,25 @@ impl DataRoot {
             Err(error) => return Ok(ObjectBinding::Unconfirmed(error.kind())),
         };
         Ok(controlled_binding(&first, &second))
+    }
+}
+
+pub(super) fn same_marker(
+    root: &DataRoot,
+    first: &std::path::Path,
+    second: &std::path::Path,
+) -> Result<(), FsError> {
+    root.inspect_relative(first)?;
+    root.inspect_relative(second)?;
+    if !root.dir.metadata(first)?.is_file() || !root.dir.metadata(second)?.is_file() {
+        return Err(FsError::OwnershipBindingUnconfirmed);
+    }
+    let options = OpenOptions::new().read(true).write(true).to_owned();
+    let first = root.dir.open_with(first, &options)?.into_std();
+    let second = root.dir.open_with(second, &options)?.into_std();
+    if controlled_binding(&first, &second) == ObjectBinding::SameObject {
+        Ok(())
+    } else {
+        Err(FsError::OwnershipBindingUnconfirmed)
     }
 }

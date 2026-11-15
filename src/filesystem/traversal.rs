@@ -51,7 +51,13 @@ pub enum WalkEntry {
 }
 impl DataRoot {
     pub fn walk(&self, path: &str, options: WalkOptions) -> Result<Vec<WalkEntry>, FsError> {
-        self.walk_checked(path, options, |_| Ok(()))
+        self.walk_checked(path, options, |path| {
+            if self.ownership_requires_actor(path)? {
+                Err(FsError::OwnershipContextRequired)
+            } else {
+                Ok(())
+            }
+        })
     }
 
     /// Check every virtual path before inspecting it or enumerating its children.
@@ -60,11 +66,41 @@ impl DataRoot {
         &self,
         path: &str,
         options: WalkOptions,
-        mut check: F,
+        check: F,
     ) -> Result<Vec<WalkEntry>, FsError>
     where
         F: FnMut(&str) -> Result<(), FsError>,
     {
+        self.walk_using(
+            path,
+            options,
+            check,
+            |path| self.stat(path),
+            |path| self.open_directory_unchecked(path),
+        )
+    }
+    pub fn walk_as(
+        &self,
+        user: &crate::users::Account,
+        path: &str,
+        options: WalkOptions,
+    ) -> Result<Vec<WalkEntry>, FsError> {
+        self.walk_using(
+            path,
+            options,
+            |_| Ok(()),
+            |path| self.stat_as(user, path),
+            |path| self.open_directory_as(user, path),
+        )
+    }
+    fn walk_using(
+        &self,
+        path: &str,
+        options: WalkOptions,
+        mut check: impl FnMut(&str) -> Result<(), FsError>,
+        stat: impl Fn(&str) -> Result<FileStat, FsError>,
+        directory: impl Fn(&str) -> Result<super::DirectoryCursor, FsError>,
+    ) -> Result<Vec<WalkEntry>, FsError> {
         let path = VirtualPath::strict(path)
             .map_err(|_| FsError::InvalidPath)?
             .to_string();
@@ -75,7 +111,7 @@ impl DataRoot {
                 return Err(FsError::WalkLimitExceeded);
             }
             check(&path)?;
-            let stat = self.stat(&path)?;
+            let stat = stat(&path)?;
             let descend = stat.kind == ObjectKind::Directory;
             push(
                 &mut observed,
@@ -89,7 +125,7 @@ impl DataRoot {
             if !descend {
                 continue;
             }
-            let mut directory = self.open_directory(&path)?;
+            let mut directory = directory(&path)?;
             let mut children = Vec::new();
             loop {
                 let entries = directory.read(ROOTFS_DEFAULTS.max_directory_page)?;

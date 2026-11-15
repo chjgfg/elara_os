@@ -46,9 +46,9 @@ fn nested_calls_consume_inherited_input_once_without_consuming_redirected_parent
 #[test]
 fn source_in_a_pipeline_is_isolated_but_uses_real_files() {
     let (root, user) = fixture();
-    let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), "X=parent; source -c 'X=child; cd /tmp; printf data > nested; cat nested' | wc -c; echo \"$X\"; pwd".into()]).unwrap();
+    let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), "X=parent; source -c 'X=child; cd /tmp; printf data > /root/nested; cat /root/nested' | wc -c; echo \"$X\"; pwd".into()]).unwrap();
     assert_eq!(report.stdout, b"4\nparent\n/\n");
-    assert_eq!(fs::read(root.root().join("tmp/nested")).unwrap(), b"data");
+    assert_eq!(fs::read(root.root().join("root/nested")).unwrap(), b"data");
 }
 #[test]
 fn combined_function_and_script_recursion_is_bounded() {
@@ -82,18 +82,18 @@ fn nested_check_encoding_permissions_and_runtime_failure_preserve_their_contract
     let (root, user) = fixture();
     fs::write(
         root.root().join("tmp/check.sh"),
-        b"touch /tmp/not-created\n",
+        b"touch /root/not-created\n",
     )
     .unwrap();
     fs::write(
         root.root().join("tmp/bad.sh"),
-        b"touch /tmp/not-created; if true; then\n",
+        b"touch /root/not-created; if true; then\n",
     )
     .unwrap();
     fs::write(root.root().join("tmp/nonutf8.sh"), [255]).unwrap();
     let report = run(&root, &user, &mut Context::new(VirtualPath::root()), &["-c".into(), "sh -n /tmp/check.sh; sh /tmp/bad.sh; echo $?; sh /tmp/nonutf8.sh; echo $?; source -c 'X=retained; cd /tmp; missing'; echo \"$X\"; pwd".into()]).unwrap();
     assert_eq!(report.stdout, b"2\n2\nretained\n/tmp\n");
-    assert!(!root.root().join("tmp/not-created").exists());
+    assert!(!root.root().join("root/not-created").exists());
     fs::write(
         root.root().join("root/private.sh"),
         b"echo private_script\n",
@@ -114,10 +114,10 @@ fn nested_check_encoding_permissions_and_runtime_failure_preserve_their_contract
 #[test]
 fn nested_scripts_share_fd_capabilities_and_never_log_source_text() {
     let (root, _) = fixture();
-    let text = transcript_in(&root, "fd open /tmp/shared create\nprintf payload | sh -c 'source -c \"fd write 0:1\"'\nfd seek 0:1 0 start\nfd read 0:1 7\nsh -c 'sh -c \"echo nested_literal_private\"'\nfd closeall\nexit 0\n");
+    let text = transcript_in(&root, "fd open /root/shared create\nprintf payload | sh -c 'source -c \"fd write 0:1\"'\nfd seek 0:1 0 start\nfd read 0:1 7\nsh -c 'sh -c \"echo nested_literal_private\"'\nfd closeall\nexit 0\n");
     assert!(text.contains("payload"), "{text}");
     assert_eq!(
-        fs::read(root.root().join("tmp/shared")).unwrap(),
+        fs::read(root.root().join("root/shared")).unwrap(),
         b"payload"
     );
     let log = fs::read_to_string(root.root().join("var/log/elara.log")).unwrap();

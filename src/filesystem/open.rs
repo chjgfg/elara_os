@@ -9,7 +9,9 @@ use std::path::Path;
 
 impl DataRoot {
     pub fn open_file(&self, virtual_path: &str, mode: FileMode) -> Result<OpenFile, FsError> {
-        if self.ownership_requires_actor(virtual_path)? { return Err(FsError::OwnershipContextRequired); }
+        if self.ownership_requires_actor(virtual_path)? {
+            return Err(FsError::OwnershipContextRequired);
+        }
         let canonical = VirtualPath::strict(virtual_path).map_err(|_| FsError::InvalidPath)?;
         let mut path = match mode.creation() {
             FileCreation::Existing => self.resolve(virtual_path).map_err(classify_open_error)?,
@@ -47,6 +49,7 @@ impl DataRoot {
             None
         };
         if mode.writable() {
+            self.ensure_write_allowed(virtual_path)?;
             path = match mode.creation() {
                 FileCreation::Existing => {
                     self.resolve(virtual_path).map_err(classify_open_error)?
@@ -61,12 +64,7 @@ impl DataRoot {
                 },
             };
         }
-        let mut options = OpenOptions::new();
-        options
-            .read(mode.readable())
-            .write(mode.writable())
-            .append(mode.behavior() == FileBehavior::Append)
-            .truncate(mode.behavior() == FileBehavior::Truncate);
+        let mut options = existing_options(mode);
         match mode.creation() {
             FileCreation::Existing => {}
             FileCreation::IfMissing => {
@@ -87,7 +85,19 @@ impl DataRoot {
     }
 }
 
-fn classify_open_error(error: FsError) -> FsError {
+/// Both raw and account-aware opens use the same host access/behavior flags.
+/// Creation is handled separately by the namespace/ownership transaction.
+pub(super) fn existing_options(mode: FileMode) -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options
+        .read(mode.readable())
+        .write(mode.writable())
+        .append(mode.behavior() == FileBehavior::Append)
+        .truncate(mode.behavior() == FileBehavior::Truncate);
+    options
+}
+
+pub(super) fn classify_open_error(error: FsError) -> FsError {
     match error {
         FsError::Io(error) if error.kind() == io::ErrorKind::NotFound => FsError::NotFound,
         FsError::Io(error) if error.kind() == io::ErrorKind::AlreadyExists => {

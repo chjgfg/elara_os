@@ -8,14 +8,21 @@ use crate::virtual_path::VirtualPath;
 use std::io::Write;
 use std::{format, writeln};
 
-const HELP: &str = "owned create PATH [TEXT]\nowned read PATH\nowned write PATH TEXT\nowned append PATH TEXT\nowned mv SOURCE DESTINATION\nowned rm PATH\nowned chmod MODE PATH\nowned stat PATH\nNew files are private (0600). Unknown legacy files are never adopted.\n";
+const HELP: &str = "owned create PATH [TEXT]\nowned read PATH\nowned write PATH TEXT\nowned append PATH TEXT\nowned mv SOURCE DESTINATION\nowned rm PATH\nowned chmod MODE PATH\nowned stat PATH\nNew files use 0666 & !umask (default 0600). New /tmp objects follow task exit; legacy objects are not adopted.\n";
 fn path(user: &Account, cwd: &VirtualPath, text: &str, access: Access) -> Result<String, String> {
     let path = cwd.resolve(text).map_err(|e| e.to_string())?;
     permissions::check(user, &path, access).map_err(|e| e.to_string())?;
     Ok(path.to_string())
 }
 fn commit(out: &mut Vec<u8>, errors: &mut Vec<u8>, commit: OwnedCommit) -> Result<(), String> {
-    writeln!(out, "object: {}\nrevision: {}", commit.object.value(), commit.revision).map_err(|e| e.to_string())?;
+    match commit.object {
+        crate::filesystem::CommitObject::Host(id)=>writeln!(out,"object: {}",id.value()),
+        crate::filesystem::CommitObject::Virtual {filesystem,inode}=>{
+            writeln!(out,"filesystem: {filesystem}").map_err(|e|e.to_string())?;
+            writeln!(out,"inode: {inode}")
+        },
+    }.map_err(|e|e.to_string())?;
+    writeln!(out,"revision: {}",commit.revision).map_err(|e|e.to_string())?;
     if let DirectoryDurability::Unconfirmed(kind) = commit.directory_durability {
         writeln!(errors, "Warning: committed; directory durability unconfirmed: {kind:?}").map_err(|e| e.to_string())?;
     }
@@ -24,7 +31,7 @@ fn commit(out: &mut Vec<u8>, errors: &mut Vec<u8>, commit: OwnedCommit) -> Resul
     }
     Ok(())
 }
-pub(super) fn execute(root: &DataRoot, user: &Account, cwd: &VirtualPath, args: &[String]) -> Result<CommandOutput, String> {
+pub(super) fn execute(root: &DataRoot, user: &Account, cwd: &VirtualPath, args: &[String], options: crate::filesystem::CreationOptions<'_>) -> Result<CommandOutput, String> {
     let mut stdout = Vec::new(); let mut stderr = Vec::new();
     let result: Result<(), FsError> = (|| {
         match args {
@@ -33,7 +40,7 @@ pub(super) fn execute(root: &DataRoot, user: &Account, cwd: &VirtualPath, args: 
             [verb, name, text @ ..] if verb == "create" && text.len() <= 1 => {
                 let name = path(user, cwd, name, Access::Write).map_err(FsError::AccessDenied)?;
                 let body = text.first().map_or(&b""[..], |s| s.as_bytes());
-                let receipt = root.create_owned_file(user, &name, body, VirtualMode::new(0o600)?)?;
+                let receipt = root.create_file_with_options(user, &name, body, options)?;
                 commit(&mut stdout, &mut stderr, receipt).map_err(FsError::AccessDenied)?;
             }
             [verb, name] if verb == "read" => {
@@ -69,6 +76,8 @@ pub(super) fn execute(root: &DataRoot, user: &Account, cwd: &VirtualPath, args: 
                 match root.ownership_as(user, &name)? {
                     OwnershipState::Managed(info) => writeln!(stdout, "object: {}\ngeneration: {}\npath: {}\nuid: {}\ngid: {}\nmode: {:03o}\nclass: {:?}\ndelete_condition: {:?}",
                         info.id.value(), info.storage_generation, info.path, info.owner.uid, info.owner.gid, info.mode.bits(), info.storage_class, info.delete_condition)?,
+                    OwnershipState::Virtual { filesystem, inode } => writeln!(stdout, "filesystem: {filesystem}
+inode: {inode:?}")?,
                     OwnershipState::LegacyUnknown => writeln!(stdout, "ownership: LegacyUnknown")?,
                     OwnershipState::Unconfirmed { id, reason } => writeln!(stdout, "object: {}\nownership: Unconfirmed({reason:?})", id.value())?,
                 }

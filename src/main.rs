@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use elara_os::{config, filesystem, initialization, shell};
+use elara_os::{config, initialization, shell};
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -17,9 +17,7 @@ fn main() {
         }
     };
     let startup = config::Config::load(&configuration).and_then(|config| {
-        let state = initialization::prepare(&config.data_root).map_err(|e| e.to_string())?;
-        let root = filesystem::DataRoot::open(&config.data_root).map_err(|e| e.to_string())?;
-        Ok((root, state))
+        initialization::prepare_open(&config.data_root).map_err(|e| e.to_string())
     });
     let (data_root, state) = match startup {
         Ok(root) => root,

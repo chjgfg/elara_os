@@ -130,10 +130,21 @@ pub(super) fn discard_owned(store: &Dir, name: &OsStr) -> Result<bool, FsError> 
     }
     if !entries.is_empty() {
         let replace = read_magic(&transaction, TX_OWNER, TX_MAGIC).unwrap_or(false);
-        let log_generation = read_magic(&transaction, TX_OWNER, LOG_GENERATION_TX_MAGIC).unwrap_or(false);
-        let object = read_magic(&transaction, TX_OWNER, super::ownership::OWNED_TX_MAGIC).unwrap_or(false);
-        if !replace && !log_generation && !object { return Ok(false); }
-        if entries.iter().any(|name| name != TX_OWNER && name != PAYLOAD && !(log_generation && name == "journal") && !(object && name == "object.owner")) {
+        let log_generation =
+            read_magic(&transaction, TX_OWNER, LOG_GENERATION_TX_MAGIC).unwrap_or(false);
+        let object =
+            read_magic(&transaction, TX_OWNER, super::ownership::OWNED_TX_MAGIC).unwrap_or(false);
+        let host_lease = read_magic(&transaction, TX_OWNER, super::host_locks::CONTAINER_MAGIC).unwrap_or(false);
+        if !replace && !log_generation && !object && !host_lease {
+            return Ok(false);
+        }
+        if entries.iter().any(|name| {
+            name != TX_OWNER
+                && name != PAYLOAD
+                && !(log_generation && name == "journal")
+                && !(object && name == "object.owner")
+                && !(host_lease && name == "witness")
+        }) {
             return Ok(false);
         }
     }
@@ -164,7 +175,11 @@ impl<'a> NamespaceGuard<'a> {
         Self { root, _file: file }
     }
     pub(super) fn require_root(&self, root: &DataRoot) -> Result<(), FsError> {
-        if std::ptr::eq(self.root, root) { Ok(()) } else { Err(FsError::InvalidRoot) }
+        if std::ptr::eq(self.root, root) {
+            Ok(())
+        } else {
+            Err(FsError::InvalidRoot)
+        }
     }
 }
 
@@ -173,15 +188,23 @@ impl DataRoot {
     pub(super) fn namespace_guard(&self) -> Result<NamespaceGuard<'_>, FsError> {
         let file = lock_store(&ensure_store(self)?)?;
         let guard = NamespaceGuard::from_locked(self, file);
+        self.recover_access_intent_locked(&guard)?;
         self.recover_owner_intent_locked(&guard)?;
         Ok(guard)
     }
 
-    pub(super) fn create_protocol_stage(&self, guard: &NamespaceGuard<'_>) -> Result<(Dir, String), FsError> {
+    pub(super) fn create_protocol_stage(
+        &self,
+        guard: &NamespaceGuard<'_>,
+    ) -> Result<(Dir, String), FsError> {
         guard.require_root(self)?;
         let store = validate_store(self)?;
         let name = loop {
-            let name = format!("txn-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+            let name = format!(
+                "txn-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
             match store.create_dir(&name) {
                 Ok(()) => break name,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -342,33 +365,51 @@ impl DataRoot {
         exclusive: bool,
         guard: &NamespaceGuard<'_>,
     ) -> Result<CommitReceipt, FsError> {
-        self.publish_protocol_payload_locked(target, ProtocolPayload::Bytes(contents), exclusive, guard)
+        self.publish_protocol_payload_locked(
+            target,
+            ProtocolPayload::Bytes(contents),
+            exclusive,
+            guard,
+        )
     }
 
     pub(super) fn publish_protocol_link_locked(
-        &self, source: &Path, target: &Path, guard: &NamespaceGuard<'_>,
+        &self,
+        source: &Path,
+        target: &Path,
+        guard: &NamespaceGuard<'_>,
     ) -> Result<CommitReceipt, FsError> {
         self.inspect_relative(source)?;
         self.publish_protocol_payload_locked(target, ProtocolPayload::Link(source), false, guard)
     }
 
     pub(super) fn publish_protocol_link_exclusive_locked(
-        &self, source: &Path, target: &Path, guard: &NamespaceGuard<'_>,
+        &self,
+        source: &Path,
+        target: &Path,
+        guard: &NamespaceGuard<'_>,
     ) -> Result<CommitReceipt, FsError> {
         self.inspect_relative(source)?;
         self.publish_protocol_payload_locked(target, ProtocolPayload::Link(source), true, guard)
     }
 
     fn publish_protocol_payload_locked(
-        &self, target: &Path, payload: ProtocolPayload<'_>, exclusive: bool, _guard: &NamespaceGuard<'_>,
+        &self,
+        target: &Path,
+        payload: ProtocolPayload<'_>,
+        exclusive: bool,
+        _guard: &NamespaceGuard<'_>,
     ) -> Result<CommitReceipt, FsError> {
         _guard.require_root(self)?;
         let bytes = match &payload {
             ProtocolPayload::Bytes(bytes) => bytes.len(),
-            ProtocolPayload::Link(source) => usize::try_from(self.dir.metadata(source)?.len()).map_err(|_| FsError::InvalidOffset)?,
+            ProtocolPayload::Link(source) => usize::try_from(self.dir.metadata(source)?.len())
+                .map_err(|_| FsError::InvalidOffset)?,
         };
         if bytes > ROOTFS_DEFAULTS.max_transaction_bytes {
-            return Err(FsError::TooLarge(ROOTFS_DEFAULTS.max_transaction_bytes as u64));
+            return Err(FsError::TooLarge(
+                ROOTFS_DEFAULTS.max_transaction_bytes as u64,
+            ));
         }
         let parent = target.parent().ok_or(FsError::InvalidPath)?;
         self.inspect_relative(parent)?;
@@ -382,7 +423,11 @@ impl DataRoot {
         }
         let store = validate_store(self)?;
         let name = loop {
-            let name = format!("txn-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+            let name = format!(
+                "txn-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
             match store.create_dir(&name) {
                 Ok(()) => break name,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -391,12 +436,14 @@ impl DataRoot {
         };
         let stage = store.open_dir(&name)?;
         let prepared = (|| -> io::Result<()> {
-            let mut owner = stage.open_with(TX_OWNER, OpenOptions::new().write(true).create_new(true))?;
+            let mut owner =
+                stage.open_with(TX_OWNER, OpenOptions::new().write(true).create_new(true))?;
             owner.write_all(TX_MAGIC)?;
             owner.sync_all()?;
             match &payload {
                 ProtocolPayload::Bytes(contents) => {
-                    let mut payload = stage.open_with(PAYLOAD, OpenOptions::new().write(true).create_new(true))?;
+                    let mut payload = stage
+                        .open_with(PAYLOAD, OpenOptions::new().write(true).create_new(true))?;
                     payload.write_all(contents)?;
                     payload.sync_all()?;
                 }

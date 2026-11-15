@@ -4,14 +4,18 @@
 
 ## 1. 权威入口、范围与证据
 
-- **核对日期**：2026-11-08。
+- **核对日期**：2026-11-15。内部 VFS 命令见[本批](#internal-vfs-commands)，应用/缓存命令见[资源生命周期](#resource-commands)。独立资源已通过489项完整回归；应用关联增量20项专项已通过，新增验收中。完整能力与最新结果以[文件系统单一账本](filesystem.md)为准；408/421/432是历史快照。
 - **项目入口**：[README](../README.md) 管理工程状态、启动验收与文档索引。
 - **模块职责**：[完整操作系统模块总览](operating-system-modules.md) 解释底层模块及依赖。
 - **命令账本**：本文件维护初始化后命令的可用性、实际语义、Ubuntu 风格目标及命令到模块的映射；新增命令必须同步本文件、程序 `help` 和 README。
 - **源码依据**：[命令分发](../src/shell.rs)、[受限文件访问](../src/filesystem.rs)、[启动入口](../src/main.rs)、[Rust 初始化](../src/initialization.rs)、[集中配置与目录布局](../src/config.rs)。
 - **范围**：ElaraOS 自己的命令环境，不是 Windows PowerShell，也不是宿主 Ubuntu 的 Bash。下文命令输入到 ElaraOS 中；不要把未来的管理命令复制到宿主执行。
 - **定位**：当前为使用宿主标准库的 Rust 命令行原型，不是独立内核。Ubuntu 风格意味着先参考命令名称与常见用法，不承诺 Bash、POSIX、GNU 工具参数或 Linux ABI 完整兼容。
-- **当前运行证据（2026-11-08）**：`cargo test --offline --target-dir target/shell-build -- --test-threads=1 --nocapture`：169模块单元+145脚本功能+6实际进程/ConPTY，**320全部通过，exit 0**；源码/测试前后一致。共同前端/嵌套/常用语法和M5流式/合作式作业已功能验收，2MiB管道与取消130已真实运行。**严格Clippy仍未通过**：FS的ownership.rs/ownership_model.rs三处lint，未改对方文件或放宽检查。详细证据和必要性对照由[脚本专题](shell-scripting.md#8-验收记录)维护；275/236/190等只作历史不累计。文件系统语义见[文件系统专题](filesystem.md)，句柄见[句柄命令](file-descriptors.md)。Linux原生、真实断电和全部敌对并发未验证。
+- **历史运行证据（2026-11-08）**：`cargo test --offline --target-dir target/shell-build -- --test-threads=1 --nocapture`：169模块单元+145脚本功能+6实际进程/ConPTY，**320全部通过，exit 0**；源码/测试前后一致。共同前端/嵌套/常用语法和M5流式/合作式作业已功能验收，2MiB管道与取消130已真实运行。**严格Clippy仍未通过**：FS的ownership.rs/ownership_model.rs三处lint，未改对方文件或放宽检查。详细证据和必要性对照由[脚本专题](shell-scripting.md#8-验收记录)维护；275/236/190等只作历史不累计。文件系统语义见[文件系统专题](filesystem.md)，句柄见[句柄命令](file-descriptors.md)。Linux原生、真实断电和全部敌对并发未验证。
+
+宿主权限限制见[硬边界](filesystem.md#host-impact-boundary-2026-11-09)；内部挂载及根内普通镜像现可使用 vfs 命令，不提供宿主 format/mount、设备或外部网络操作。
+
+最新四项权限/生命周期实现、严格 Clippy 通过及运行测试权限阻塞见[当前文件系统账本](filesystem.md#directory-access-task-2026-11-09)。上一阶段受管 fd、跨命令对象授权、cp/mv 归属和质量门见[文件系统单一账本](filesystem.md#owned-open-2026-11-09)；2026-11-08 的 Clippy 未过已改判为历史，不代表当前质量门。
 
 ### 1.0 运行方式
 
@@ -27,6 +31,8 @@
 
 **本表列三十四个常用系统/会话命令：`help`、`info`、`pwd`、`cd`、`ls`、`cat`、`mkdir`、`touch`、`rm`、`rmdir`、`mv`、`cp`、`stat`、`find`、`du`、`echo`、`sleep`、`ps`、`wait`、`jobs`、`fg`、`bg`、`kill`、`whoami`、`users`、`useradd`、`passwd`、`su`、`log`、`sh`、`source`、`fd`、`clear`、`exit`。`.` 为 `source` 别名，`&` 是语法操作符，`fd` 子命令不重复计。共同语言另有 `printf/wc/test/true/false/export/:` 等内建；新增对象归属桥以文件系统账本为准，不将三十四误称全部可解析命令总数。创建了 Ubuntu 风格目录，不等于对应内核、服务或工具已经实现。**
 
+`owned` 是额外的受管普通对象接口，不计入上面的 34 个常用命令子集；语法见下表与文件系统账本。
+
 交互与脚本共用词法/AST/求值入口，支持常用语法、嵌套 `sh/source`、适用内建阶段的并发流式管道和作用域 `&` 作业。非适用阶段显式回退到64KiB缓冲；不是完整 Bash、内核 IPC 或进程组，每次提示符输入仍要求完整单行程序。
 
 ### 1.2 五模块增量（2026-11-07）
@@ -36,7 +42,13 @@
 | 文件读写层 | `cat`、`mkdir`、`touch`、`rm`、`rmdir` | 只在虚拟根内；拒绝 `rm /`、系统目录、`..`、宿主路径、链接、设备名；`rm` 对目录、`rmdir` 对非空目录给出精确错误 |
 | 交互命令解析器 | 共用脚本前端，引号、变量、连接符、管道与重定向 | 旧单行解析器不再参与普通命令分发；不支持的语法整行拒绝 |
 | Shell 脚本 | `sh/source/.`、常用语法、并发流式阶段、有界回退、作用域作业 | 不执行宿主程序；流式与回退策略/成本、cooperation/身份边界见[脚本专题](shell-scripting.md) |
-| 文件句柄命令 | `fd open/read/readat/write/writeat/seek/truncate/stat/dup/sync/close/closeall` | 由文件系统实现IO，ModuleCommands薄适配；打开检查账号，表绑定uid，身份切换关闭能力 |
+| 虚拟执行入口与身份 | `exec FILE [ARGS]` | 仅受管UTF-8 Elara脚本，检查x/ACL/绑定后执行不可变映像；成功替换当前虚拟脚本边界，失败保留调用环境；不执行宿主程序；文件setuid/SGID改变虚拟有效身份，`id`显示真实/有效/保存UID/GID；sh/source不提权；[边界与验收](filesystem.md#execution-identity-2026-11-14) |
+| 文件句柄命令 | `fd open/read/readat/write/writeat/seek/truncate/stat/dup/same/lock/unlock/sync/close/closeall` | 由文件系统实现IO，ModuleCommands薄适配；打开检查账号，表绑定uid，身份切换关闭能力 |
+| 受管普通对象 | `owned create/read/write/append/mv/rm/chmod/stat` | 新对象使用会话 umask（默认0600），旧数据不自动认领；目录、共享组/access ACL、任务临时回收已接入，严格 Clippy 已通过，当前目录setgid快照390/390通过；[当前FS账本](filesystem.md#directory-access-task-2026-11-09) |
+| 会话创建策略 | `umask [MASK]` | 默认0077；无default ACL时文件0666、目录0777分别扣mask；有模板时只按requested mode裁剪；source保留、sh隔离、后台继承、su重置；当前目录setgid快照390/390通过 |
+| 虚拟访问元数据 | `chmod MODE PATH`、`chgrp GID PATH`、`getfacl PATH`、`setfacl SPEC PATH`、`setfacl -b PATH`、`setfacl -d SPEC DIR`、`setfacl -k DIR` | 受管文件/目录；目录MODE额外支持sticky 1000/setgid 2000，普通文件额外支持setuid 4000/setgid 2000，写内容先清06000；文件sticky与目录setuid拒绝；[sticky当前验收](filesystem.md#sticky-2026-11-09)；access ACL/mask及目录default ACL继承专项与真实CLI已通过，当前目录setgid快照390/390通过；虚拟权限不映射宿主chmod；[增量协议与字面子集](filesystem.md#default-acl-2026-11-09) |
+| 持久共享组 | `groupadd GID NAME`、`groupmem add\|del GID UID`、`groupmem primary GID UID`、`groups` | 管理root-only；按主组/成员授权，数字ID为字面值 |
+| 临时生命周期 | 无清理命令 | 新任务作用域/tmp对象结束回收，启动只回收有归属证明的死租约；旧/未知数据保留 |
 | 任务模块 | `sleep N [bg]`、`ps`、`wait ID` | 任务是程序内部对象，`ps` 不列出宿主进程，不能操作宿主进程 |
 | 用户与权限 | `/etc/passwd`、`/etc/shadow`、`whoami`、`users`、`useradd`、`passwd`、`su` | `root`（uid 0）是唯一管理员；密码为加盐 SHA-256 多轮哈希；普通用户不能读 `/root` 和 `/var/log`，只能写自己的 home 和 `/tmp` |
 | 日志模块 | `/var/log/elara.log`、`log [N]` | 启动和每条命令都记录；`su/passwd/useradd` 不记录密码；仅 root 可查看 |
@@ -48,9 +60,34 @@
 | `root` | 合法虚拟路径（文件系统保留空间除外） | 可请求写入，但必须通过文件系统写入分类；系统只读区与未分类路径不能写，系统目录本身不可删除 |
 | 普通用户 | 除 `/root`、`/var/log`、`/etc/shadow` 外的路径 | 仅自己的 home（`/home/<name>`）和 `/tmp` |
 
+路径规则之外，受管普通文件另检查所有者/mode 与归属绑定；fd 新建和 cp 新目标登记发起者，gid==uid 仅为私有主组。fd stat 的 owner_uid 是会话主体，uid 是对象所有者。
+
 Windows 路径的权限比较同时覆盖大小写别名，例如 `/ROOT`、`/VAR/LOG`、`/ETC/SHADOW` 不能绕过规则；其他平台保持本地大小写语义。
 
 `su <name>` 由 root 执行时不需要密码；普通用户切换账户必须提供密码：`su <name> <password>`。切换后若当前目录对新用户不可读，自动回到 `/`。
+
+<a id="resource-commands"></a>
+### 1.4 应用与缓存资源生命周期
+
+以下为 ElaraOS 内部命令，不是宿主软件安装器；除 help 外均限管理员。登记只创建全新目录，不导入、扫描认领或覆盖已有内容。所有配额参数为十进制整数：BYTES 为1..67108864，OBJECTS 为1..4096，根目录本身计1对象。最多登记64个资源。
+
+| 字面语法 | 实际语义 |
+|---|---|
+| `app register PATH BYTES OBJECTS` | 在 `/opt` 或 `/srv` 下新建并持久登记应用资源根；不是下载/安装软件包 |
+| `app list` / `app stat PATH` | 列应用记录 / 查看记录及当前登记对象逻辑用量 |
+| `app quota PATH BYTES OBJECTS` | 改配额；低于当前用量拒绝；既有FD下一次写也受新配额约束 |
+| `app cache APP PATH BYTES OBJECTS` / `app data APP PATH BYTES OBJECTS` | 为已登记应用原子创建关联缓存/数据目录；数据位置限home用户子目录或root子目录，仍由管理员拥有和控制 |
+| `app locations APP` | 列出该应用绑定的缓存/数据资源位置、ID和配额 |
+| `app uninstall PATH` | 一次持久事务冻结应用及所有关联位置，再先子后父逐项回收；未知或被替换对象保留，整组支持重启续办 |
+| `cache register PATH BYTES OBJECTS` | 在 `/var/cache` 下新建并持久登记缓存资源根 |
+| `cache list` / `cache stat PATH` / `cache quota PATH BYTES OBJECTS` | 列表、用量及配额，语义与应用资源一致 |
+| `cache clear PATH` | 将明确登记缓存标记Evicting，只失效其登记子对象；完成后根目录及ID保留，可再生成缓存 |
+| `cache unregister PATH` | 持久标记Removing并撤销该缓存资源，完成后移除登记根 |
+| `app help` / `cache help` | 查看实际参数和边界 |
+
+以上是已登记资源的显式生命周期操作，不提供全盘清理、未知文件删除或宿主优化。出现无法核验的绑定/未知内容时保留它们，输出 `Cleanup deferred; registration retained for recovery.` 并返回状态1；下次启动按原登记继续，不用目录名猜测归属。配额不包含未知文件、协议暂存、元数据或仍由旧FD持有的脱离代际，因此不是物理磁盘限额。
+
+独立`cache register`不自动属于应用；通过`app cache`/`app data`显式创建的关联位置随应用卸载。无关数据不联动；仍不把此接口当作设计原则P4的完整应用模型。没有依赖解析、独立应用执行身份和压力自动驱逐。专项命令验收使用新测试数据根，未运行实际 `.env` 数据根。核心/脚本/真实进程证据统一在[资源账本](filesystem.md#resources-2026-11-15)。
 
 ## 2. 初始化完成的含义
 
@@ -79,7 +116,7 @@ Windows 路径的权限比较同时覆盖大小写别名，例如 `/ROOT`、`/VA
 - 每次进入命令环境，虚拟当前目录从 `/` 开始；`cd` 不修改宿主进程的工作目录。
 - `/` 表示 ElaraOS 的虚拟根，当前 Windows 实例对应配置的数据目录，而不是宿主磁盘根。
 - `/root` 只是目录名，不表示当前身份是 Linux `root` 用户。
-- `/proc`、`/sys`、`/dev`、`/run` 当前都是普通数据目录；没有伪文件系统、设备节点或服务状态接口。
+- `/proc`、`/sys`、`/dev` 现在默认由虚拟 provider 提供：只读身份/系统信息与 null/zero/full 字节设备；启动拒绝隐藏宿主 backing 内的未知内容，系统挂载不可卸载。`/run`、`/var/run` 仍是宿主能力目录，新运行态对象必须登记任务租约；不是完整进程文件系统或设备驱动模型。
 - `/bin`、`/sbin`、`/lib` 是普通目录，不是 Ubuntu 的合并 `/usr` 软链接。
 - `/snap` 不表示安装了 Snap；`/boot` 不表示已有启动镜像。
 - 不执行宿主命令，不建立网络连接，不修改宿主服务、驱动、分区或启动配置。
@@ -111,7 +148,7 @@ Windows 路径的权限比较同时覆盖大小写别名，例如 `/ROOT`、`/VA
 | `rmdir` | `rmdir empty-dir` | 逐个删除空目录 | 部分可用；非空目录报错；无递归；系统目录被拒绝 |
 | `echo` | `echo hello`、`echo -n "$X"` | 已展开参数按空格连接，默认换行；`-n`不换行 | 部分可用；变量与重定向通过共同语言求值 |
 | `sleep` | `sleep 2`、`sleep 5 bg`、`sleep 5 &` | 前台等待并记旧任务；bg参数为旧计时器；&为作用域脚本worker | 部分可用；整数0–3600秒；worker内sleep可合作式暂停/取消，不是宿主调度 |
-| `ps` | `ps` | 列出旧TaskTable的ID、状态、命令 | 不列宿主进程；作用域脚本作业用jobs查看，两个ID命名空间分开 |
+| `ps` | `ps` | 列出legacy TaskTable的ID、状态、命令 | 不列宿主进程；状态同时投影到`/proc/jobs`为`legacy-task`，作用域脚本作业用jobs查看，两个ID命名空间分开 |
 | `wait` | `wait 2`、`wait %2` | 数字ID等旧任务；%ID等脚本作业、收集输出、移除并join | 一次一个ID；作用域ID回收后不复用；worker不能等待自身或阻塞等旧任务 |
 | `jobs` | `jobs` | 列出当前UID的作用域作业及实际状态 | 部分可用；完成未wait仍占槽，总记录最多16 |
 | `fg` | `fg %2` | 请求恢复、等待并回收作用域作业 | 合作式，不切换宿主TTY进程组 |
@@ -134,7 +171,7 @@ Windows 路径的权限比较同时覆盖大小写别名，例如 `/ROOT`、`/VA
 
 - 目录项排序后逐行输出；目录后缀为 `/`，普通文件没有后缀。
 - 名为 `.elara-root` 的标记项被隐藏；其他点开头的条目没有统一隐藏规则，不能等同于 Ubuntu 默认 `ls`。
-- 符号链接或 Windows reparse point 条目显示 ` [link blocked]`，不能沿链接访问。
+- 宿主原生符号链接或 Windows reparse point 条目显示 ` [link blocked]`，不能沿链接访问。
 - 访问不存在的目录、普通文件或非法路径时输出 `Error: ...`。
 - Shell 在虚拟命名空间内归一化 `.`、`..` 和重复 `/`；例如 `ls /usr/../etc` 访问 `/etc`。任何走到根以上的路径仍被拒绝。
 - 宿主文件访问后端仍只接受不含 `.`、`..` 的已归一化路径；拒绝反斜杠、盘符、冒号、控制字符、标记路径和保留设备名。
@@ -205,7 +242,7 @@ exit
 | `mv /tmp/a.txt /tmp/b.txt` | 原子改名基础子集已可用；跨后端迁移待实现 | §13 文件系统；§12 持久化 | 不覆盖，无copy/delete回退；按凭据区分可见提交与目录持久性 |
 | `rmdir /home/demo/empty` | 删除空目录 | §13 文件系统；§15 权限 | 非空拒绝；根、标记及受保护布局目录政策先明确 |
 | `rm /tmp/a.txt` | 删除普通文件 | §13 文件系统；§15 权限 | 删除与递归策略分别设计；实际清理操作仍先交清单等授权 |
-| `ln -s /home/demo /tmp/demo` | 符号链接 | §13 路径与命名空间；§15 隔离 | 后期可选；现阶段明确禁止链接，不能直接取消守卫来支持命令 |
+| `ln -s /home/demo /tmp/demo` | 符号链接 | §13 路径与命名空间；§15 隔离 | 原生链接仍禁止；受管虚拟链接使用vfs symlink，不通过取消宿主守卫实现 |
 
 ### 4.2 Shell、终端与程序运行
 
@@ -397,6 +434,7 @@ PASS: 4 sessions; 54 input lines; 8 commands; cd/pwd/ls state; Unicode; 40-line 
 
 | 日期 | 修订内容 |
 |---|---|
+| 2026-11-09 | fd 接账号/对象/归属门；受管 cat/wc/脚本/输入流与只读诊断不绕对象权限；cp 新目标归调用者、mv 保持受管身份，目录受管后代整体移动仍拒绝。新增 owned 说明并同步 help；质量门与最终计数只引用文件系统单一账本。 |
 | 2026-11-08 | M5流式和作用域作业接通，常用清单34项；修订旧不支持&及全部顺序缓冲口径，注明%ID/旧数字ID、cooperation/队列限额、typed fallback、退出/身份join。稳定全量169+145+6=320通过、三个必要性对照成立；严格Clippy仍有FS三处lint，未冒称全绿。 |
 | 2026-11-08 | 常用语法限定子集接入提示符/脚本并验收；新增展开、glob/tilde、case/作用域/IFS/退出选项/EXIT，堵住提示符和累计参数、保存绑定预算通道。最终152+118+5=275和严格Clippy通过，真实程序已运行核心语法；旧236等保留历史。真正流式及一般作业继续实施。 |
 | 2026-11-08 | 文件命令桥、共同前端、exit状态和嵌套sh/source完成验收；三十常用命令清单与额外内建分开计。cat不补换行，多路径顺序执行；修订旧拒绝变量/操作符规则并保留安全守卫。全量152+79+5=236及严格Clippy通过；source exit结束调用环境。常用语法、真正流式管道与一般作业继续实施。 |
@@ -410,3 +448,190 @@ PASS: 4 sessions; 54 input lines; 8 commands; cd/pwd/ls state; Unicode; 40-line 
 | 2026-11-07 | 用户实测反馈修正：新增 `permissions.rs` 权限模型（普通用户不可读 `/root`、`/var/log`，只可写 home 与 `/tmp`）、`/etc/shadow` 加盐 SHA-256 密码、`passwd` 命令、带密码的 `su`；新增 `rmdir`，`rm` 对目录/缺失路径给出精确错误；`clear` 改为 ANSI 清屏序列；日志不记录密码。命令数二十二；63 个测试与真实进程验收通过。 |
 | 2026-11-07 | 第二轮反馈修正：root 首次启动无密码时引导设置（可跳过）；`su` 到当前用户直接提示；新增 `terminal.rs` 隐藏回显读取，`useradd/passwd/su` 省略密码时交互输入两次确认；`passwd` 无参数改自己。68 个测试与真实进程验收通过；真实终端隐藏效果待用户确认。 |
 | 2026-11-07 | 当前收尾：修正 22 个命令计数；移除 PowerShell/stty 辅助执行，改用原生 Rust 密码读取；隐藏不可用时失败关闭，跳过/EOF/确认不匹配以枚举区分。新增权限预检、shadow 读取保护与 Windows 大小写别名测试。73 单元测试和 1 Windows ConPTY 集成测试通过；旧批次证据继续按历史保留。 |
+
+目录setgid继承、默认ACL独立性及历史sticky审批阻塞见[目录SGID增量](filesystem.md#directory-setgid-2026-11-09)；当前命名语义与验收见[sticky增量](filesystem.md#sticky-2026-11-09)；`chmod 2770 DIR`只改变虚拟元数据，不执行宿主chmod或提权。
+
+<a id="internal-vfs-commands"></a>
+## 内部文件系统命令（2026-11-14）
+
+下列输入到 ElaraOS，不是 PowerShell；只演示新建的内存卷和根内普通文件。
+
+```text
+vfs mount /mnt/work 65536 64
+mkdir /mnt/work/dir
+printf payload > /mnt/work/dir/file
+vfs link /mnt/work/dir/file /mnt/work/alias
+vfs symlink dir/file /mnt/work/link
+cat /mnt/work/link
+vfs snapshot /mnt/work /mnt/snapshot
+vfs clone /mnt/snapshot /mnt/clone
+vfs save /mnt/work /root/volume.img
+vfs unmount /mnt/clone
+vfs unmount /mnt/snapshot
+vfs unmount /mnt/work
+vfs load /root/volume.img /mnt/restored
+cat /mnt/restored/alias
+vfs unmount /mnt/restored
+```
+
+| 命令 | 精确语义 |
+|---|---|
+| `vfs mount PATH BYTES INODES` | root 登记新 /mnt/NAME 内存卷，或在已有内部卷的目录下登记新名字的嵌套卷；不覆盖已有宿主/卷内对象；BYTES 为逻辑 payload 上限，INODES 包含根 inode |
+| `vfs mounts` / `vfs unmount PATH` | 列出内部挂载／卸载；有解析 pin、文件或目录租约时 Busy；不是宿主 umount |
+| `vfs inode PATH` / `vfs stats PATH` | inode 元数据／卷字节、inode、目录项与读写计数；不伪造物理占用 |
+| `vfs link SOURCE DEST` | 同内部卷或同Host受管普通文件硬链接，目录拒绝，跨后端 CrossDevice；Host必须对象所有者/root、同存储类别/资源域且目标不存在；[27项专项、默认实跑及573项全量通过](filesystem.md#host-hardlinks-2026-11-15) |
+| `vfs symlink TARGET DEST` / `vfs readlink PATH` | 内部卷绝对目标以卷根解释；Host受管链接绝对目标以虚拟根解释、相对目标以链接父目录解释，最多40次；Host增量[专项及默认程序实跑通过](filesystem.md#host-symlinks-2026-11-15)，跨Host/内部卷仍拒绝 |
+| `vfs symlink-global TARGET DEST` | 显式绝对内部命名空间链接；仅解析到已注册内部挂载，不回落Host；核心、脚本及实际进程已验收 |
+| `vfs rename SOURCE DEST` | 同内部卷或受管Host覆盖rename；旧目标FD和其余硬链接保留；不同类型/非空目录/跨域拒绝；[Host专项与真实双进程通过](filesystem.md#host-rename-2026-11-15) |
+| `vfs quota PATH UID BYTES INODES` | root 设置 UID 配额；已用量超过新限额则事务失败 |
+| `vfs snapshot SOURCE DEST` / `vfs clone SOURCE DEST` | 卷根复制元数据／索引并共享不可变 4KiB 数据页；snapshot 只读，clone 可写；冻结快照经保存/重载保留只读属性；独立镜像间不共享磁盘块 |
+| `vfs save MOUNT IMAGE` / `vfs load IMAGE MOUNT` | 保存/加载带校验镜像；保存必须指向宿主后端的根内受管普通文件，加载结果明确 Clean 或 RecoveredReadOnly |
+| `vfs pseudo proc\|sys\|dev PATH` | 在新 /mnt/NAME 或内部卷目录下的新名字挂生成信息或虚拟字节设备；默认 /proc /sys /dev 另有不可卸载的 System provider |
+
+普通 `cat/mkdir/touch/rm/rmdir/mv/cp/chmod/chgrp/getfacl/setfacl/find/du/exec`、重定向和 `owned` 接入内部卷；`mv` 仍不覆盖，只有 `vfs rename` 显式覆盖。所有账号路径门仍有效，普通用户不会因为卷内 mode 可写便获得 /mnt 写权限。
+
+```text
+vfs pseudo proc /mnt/proc
+cat /mnt/proc/identity
+cat /mnt/proc/uptime
+vfs pseudo sys /mnt/sys
+cat /mnt/sys/limits
+vfs pseudo dev /mnt/dev
+printf discarded > /mnt/dev/null
+fd open /mnt/dev/zero read
+fd read 0:1 4
+fd closeall
+vfs unmount /mnt/dev
+vfs unmount /mnt/sys
+vfs unmount /mnt/proc
+```
+
+proc 的 identity 在每次 open 按调用者虚拟凭据生成；uptime 是该 provider 挂载实例运行时间，不是宿主开机时间。每个打开描述中的生成正文在部分读取间保持不变。dev/null 读 EOF、写丢弃；zero 有界读返回零、写丢弃；full 写非空明确 NoSpace。没有宿主设备、进程或路径透传。
+
+**验证**：21 项 VFS 专项含两个真实进程保存/加载、未知根外哨兵保留；后续新增的受管接口及配额边界以完整回归为准。持久化、容量和未实现项见[能力边界](filesystem.md#internal-vfs-2026-11-14)。
+
+### 运行态文件与数据页统计（2026-11-15）
+
+```text
+mkdir /run/session
+printf ready > /run/session/state
+cat /run/session/state
+owned stat /run/session/state
+exit
+```
+
+以上命令只在 ElaraOS 中执行。新运行态文件报告 RuntimeState / TaskExit；会话退出按登记精确回收。CLI 崩溃后下一次启动先核验租约是否已死，再回收所属对象；不会扫描删除未知 /run 文件。普通用户原路径门不变，示例使用虚拟 root。API 新建必须提供 CreationOptions.scope；已有运行态文件的读取不要求新 scope。历史 OwnerRequest 目录保留，不自动认领。
+
+`vfs stats` 可报告非零数据页分配、共享页引用和 COW 复制字节；snapshot/clone 共享数据页，但仍复制元数据，save/load 仍是完整 checkpoint。用法和实测以[运行态与 COW 账本](filesystem.md#runtime-cow-2026-11-15)为准。
+
+### 挂载目录与工作目录（2026-11-15）
+
+`ls /mnt`、`find /mnt`、`du /mnt`、`echo /mnt/*` 统一看到挂载目录项；支持 `vfs mount /mnt/work/parent/child BYTES INODES`，其中 parent 必须是已存在的真实卷内目录，不能是 symlink。子卷不随父卷 save/snapshot 隐式导出。
+
+`cd` 使用 search-only 工作目录租约，进入 0111 目录不额外要求 read。内部 cwd 规范化到实际目录；其目录/祖先在租约存在时不允许改名或删除，返回 Busy。上下文/后台任务 clone 共享租约；离开目录且最后持有者释放后才允许卸载。持有列出子卷的目录快照同样使该子卷 Busy，关闭快照后释放。详见[文件系统命名空间契约](filesystem.md#namespace-2026-11-15)。
+
+当前专项真实命令链已通过，完整回归进行中；不把卷内 symlink 说成支持跨挂载。
+
+### 默认虚拟信息与设备（2026-11-15）
+
+不需要先执行 vfs mount：`cat /proc/identity`、`cat /sys/version`、`cat /sys/limits`、`printf discarded > /dev/null` 可直接使用。有限读取用 `fd open /dev/zero read`、`fd read 0:1 4`、`fd closeall`。`/dev/full` 非空写明确 NoSpace。guest 也可进行这些设备 IO，但不能创建/删除/替换设备或修改系统目录。
+
+`vfs mounts` 输出路径与 User/System(Proc)/System(Sys)/System(Dev) 类型。系统 provider 不能卸载；启动发现这些目录已有未知对象时报告 SystemProviderConflict 并保留原物，不静默隐藏或清空。详见[实现与验收](filesystem.md#system-providers-2026-11-15)。
+
+### 块镜像、认证密封、去重与冻结overlay（2026-11-15）
+
+以下为ElaraOS内部命令，不是宿主Shell命令。镜像/密钥须根内允许的UserData受管普通文件；这些管理命令要求root。
+
+| 命令字面值 | 实际语义 |
+|---|---|
+| `vfs disk-create MOUNT IMAGE SLOTS CACHE_PAGES` | 新建ELARABK1镜像；8..65536个4KiB槽、1..512缓存页；容量预检失败不创建文件 |
+| `vfs disk-save MOUNT IMAGE CACHE_PAGES` | 显式提交变化记录、新清单和另一根；不自动持久化每次内存写入 |
+| `vfs disk-load IMAGE MOUNT CACHE_PAGES` | 完整验证并物化内存卷；回退代为RecoveredReadOnly |
+| `vfs disk-stat IMAGE CACHE_PAGES` | 本次打开的缓存/IO统计和槽分配统计，不是常驻历史累计或宿主物理用量 |
+| `vfs disk-repair IMAGE CACHE_PAGES` | 验证图后重发幸存根；不恢复损坏版本已丢的数据 |
+| `vfs keygen KEYFILE` | 新建32字节随机0600密钥；不接受资源卸载生命周期，不输出密钥 |
+| `vfs seal MOUNT IMAGE KEYFILE` | ChaCha20-Poly1305认证密封ELARAFS1 checkpoint；不是透明块加密 |
+| `vfs unseal IMAGE MOUNT KEYFILE` | 先认证后解析；错误密钥/篡改拒绝且不挂载 |
+| `vfs dedup MOUNT` | 显式卷内页去重；全字节比较和后续COW隔离；输出引用减少而非RSS/磁盘释放 |
+| `vfs overlay LOWER UPPER DEST [WHITEOUT...]` | 分别冻结源卷、upper覆盖、目录合并；whiteout是卷内绝对路径；结果独立可写，不跟随源变化 |
+
+保存前的内存修改仍可能丢失；密钥与密文同根不等于离线隔离。冻结快照可保存为独立命名镜像，但没有共享块快照目录管理；frozen overlay不是live overlayfs。详见[块镜像](filesystem.md#block-store-2026-11-15)、[密封](filesystem.md#sealed-images-2026-11-15)、[去重与overlay](filesystem.md#dedup-overlay-2026-11-15)。
+
+### 保存并恢复冻结快照（2026-11-15，专项与真实进程已通过）
+
+以下命令在ElaraOS内部依次执行；使用新的镜像名字，不覆盖已有文件：
+
+```text
+vfs mount /mnt/work 65536 64
+printf original > /mnt/work/file
+vfs snapshot /mnt/work /mnt/snapshot
+vfs disk-create /mnt/snapshot /root/frozen.disk 64 1
+vfs unmount /mnt/snapshot
+vfs disk-load /root/frozen.disk /mnt/restored 1
+vfs stats /mnt/restored
+vfs clone /mnt/restored /mnt/editable
+printf changed > /mnt/editable/file
+cat /mnt/restored/file
+```
+
+恢复卷显示`access: FrozenSnapshot`，最后读取仍为`original`。直接对恢复卷写入返回`ReadOnly`；需要修改时显式clone。`Clean`仅表示镜像没有损坏，不表示卷可写。`disk-repair`消除恢复降级，不清除快照冻结属性。普通旧镜像没有冻结标记，保持原来的可写恢复语义。格式与边界见[快照属性持久化](filesystem.md#persistent-snapshot-2026-11-15)。
+
+### 跨内部挂载链接（已验收）
+
+`vfs symlink-global /mnt/data/file /mnt/front/link`创建显式全局虚拟链接；`vfs symlink file /mnt/front/local`仍按原有卷内规则解释。读写和`cd`可跟随跨挂载目标；`rm`删除链接本身，`vfs readlink`输出原字符串。目标尚未挂载或落在Host后端时返回`CrossDevice`；该命令不创建宿主链接。不同卷之间的`mv`/硬链接仍拒绝。详见[跨挂载解析边界](filesystem.md#cross-mount-links-2026-11-15)。
+
+### 虚拟任务租约目录
+
+```text
+sh -c 'touch /tmp/proc-lease; ls /proc/tasks; cat /proc/tasks/*/status'
+```
+
+租约在首次创建操作时惰性登记；纯读取脚本不会产生条目，空目录上的未匹配通配符不能用于cat。示例先创建任务临时文件，最后租约持有者退出时回收；交互shell嵌套sh共享会话租约，子sh返回不一定已回收。这里的ID是资源租约ID，不是`jobs`的`%ID`，也不是宿主PID。状态为`LeaseHeld`、`Recoverable`、`MissingLease`或`Unconfirmed`，不把持锁写成Running。状态内容仅owner/root可读，观察不会触发清理。退出后名称消失，已打开FD保留原内容。详见[proc租约目录](filesystem.md#proc-task-leases-2026-11-15)。
+
+### 作用域作业状态目录
+
+```text
+sleep 30 &
+kill -STOP %1
+cat /proc/jobs/*/status
+kill -TERM %1
+wait %1
+ls /proc/jobs
+```
+
+这里的sleep与kill只作用于Elara内部worker，不启动宿主命令或向宿主进程发信号。`state: Stopped`要求worker已确认暂停；`PauseRequested`不是Stopped。路径中的观察ID与`job_id`是不同编号域，不能把观察ID直接用于kill。wait回收后新名称消失，打开的status FD保留旧内容。详细边界见[作用域作业目录](filesystem.md#proc-runtime-jobs-2026-11-15)。
+
+### 打开对象身份比较
+
+在新会话中执行`fd open /root/identity create`，用输出token执行`fd dup TOKEN`，然后`fd same TOKEN DUP_TOKEN`应输出SameObject。独立打开也可比较；对象替换后旧新FD为DifferentObject；Host不能确认时明确Unconfirmed，不比较路径或字节猜身份。具体实跑证据见[身份账本](filesystem.md#opened-identity-2026-11-15)。Host协作锁原专项及默认程序实跑通过；后续双见证身份、V3出生协议与按冲突扫描27项专项通过，默认程序复测亦通过，当前全目标560项通过，严格Clippy与默认构建通过；详见[锁账本](filesystem.md#host-locks-2026-11-15)，不能将本身份命令的证据挪作锁验收。
+
+### 2026-11-15 Host受管普通文件硬链接
+
+以下序列已由默认程序在独立测试根实际执行：
+
+```text
+owned create /root/a original
+vfs link /root/a /root/b
+fd open /root/a read
+fd open /root/b read
+fd same 0:1 1:1
+owned write /root/b changed!
+printf OLD=
+fd read 0:1 8
+printf NEW=
+cat /root/a
+exit 0
+```
+
+输出包含`SameObject`及`OLD=originalNEW=changed!`。重启后经`owned rm`、`owned mv`删除全部名称，预先打开的FD仍可读`changed!`。命令不操作宿主账号、权限或挂载；目录同步仍可能明确报告`PermissionDenied`而不是伪装已持久。完整证据及全量进度见[Host硬链接账本](filesystem.md#host-hardlinks-2026-11-15)。
+
+
+### legacy计时与当前前台执行观察
+
+```text
+sleep 0
+cat /proc/jobs/*/status
+cat /proc/executions/*/status
+```
+
+第一类带`task_id`和`kind: legacy-task`，已完成计时显示`TaskExited(0)`，有界历史在身份切换/会话结束退休。第二类显示当前这次前台解释器调用自身，返回后不保留历史；后台作业仍由`jobs`管理，不重复算为前台。所有目录均为虚拟只读投影，不读取宿主进程。实现与验收边界见[前台观察账本](filesystem.md#proc-foreground-2026-11-15)。

@@ -79,7 +79,7 @@ mod tests {
     use std::{assert, assert_eq};
 
     fn root() -> Account {
-        Account {
+        Account { identity: Default::default(),
             name: "root".into(),
             uid: 0,
             home: "/root".into(),
@@ -87,7 +87,7 @@ mod tests {
     }
 
     fn alice() -> Account {
-        Account {
+        Account { identity: Default::default(),
             name: "alice".into(),
             uid: 1000,
             home: "/home/alice".into(),

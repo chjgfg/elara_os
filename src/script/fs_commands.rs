@@ -2,7 +2,7 @@
 use super::modules::{CommandOutput, InputUse};
 use super::runtime::MAX_OUTPUT;
 use crate::filesystem::{
-    CleanupStatus, DataRoot, DirectoryDurability, FsError, WalkEntry, WalkOptions,
+    CleanupStatus, DataRoot, DirectoryDurability, WalkEntry, WalkOptions,
 };
 use crate::permissions::{self, Access};
 use crate::users::Account;
@@ -12,11 +12,6 @@ use std::{format, writeln};
 
 fn authorized(user: &Account, path: &VirtualPath, access: Access) -> Result<(), String> {
     permissions::check(user, path, access).map_err(|error| error.to_string())
-}
-fn check_tree(user: &Account, text: &str) -> Result<(), FsError> {
-    let path = VirtualPath::strict(text).map_err(|_| FsError::InvalidPath)?;
-    permissions::check(user, &path, Access::Read)
-        .map_err(|error| FsError::AccessDenied(error.to_string()))
 }
 fn bounded(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > MAX_OUTPUT {
@@ -42,6 +37,7 @@ pub(super) fn execute(
     cwd: &VirtualPath,
     command: &str,
     args: &[String],
+    options: crate::filesystem::CreationOptions<'_>,
 ) -> Result<CommandOutput, String> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -67,9 +63,7 @@ pub(super) fn execute(
             )?;
             authorized(user, &destination, Access::Write)?;
             if command == "mv" {
-                let receipt = root
-                    .rename(&source.to_string(), &destination.to_string())
-                    .map_err(|error| error.to_string())?;
+                let receipt = root.rename_as(user, &source.to_string(), &destination.to_string()).map_err(|error| error.to_string())?;
                 durability(&mut stderr, "source directory", receipt.source_directory)?;
                 durability(
                     &mut stderr,
@@ -77,9 +71,8 @@ pub(super) fn execute(
                     receipt.destination_directory,
                 )?;
             } else {
-                let receipt = root
-                    .copy_file(&source.to_string(), &destination.to_string())
-                    .map_err(|error| error.to_string())?;
+                let bytes = root.read_file_as(user, &source.to_string(), crate::config::ROOTFS_DEFAULTS.max_transaction_bytes as u64).map_err(|e| e.to_string())?;
+                let receipt = root.create_file_with_options(user, &destination.to_string(), &bytes, options).map_err(|e| e.to_string())?;
                 durability(
                     &mut stderr,
                     "destination directory",
@@ -107,14 +100,14 @@ pub(super) fn execute(
             let path = path.to_string();
             match command {
                 "stat" => {
-                    let stat = root.stat(&path).map_err(|error| error.to_string())?;
+                    let stat = root.stat_as(user, &path).map_err(|error| error.to_string())?;
                     writeln!(stdout, "path: {path}\nkind: {:?}\nlength: {}\nhost_readonly: {}\ncreated: {:?}\nmodified: {:?}\naccessed: {:?}",
                         stat.kind, stat.length, stat.host_readonly, stat.created, stat.modified, stat.accessed)
                         .map_err(|error| error.to_string())?;
                 }
                 "find" => {
                     let tree = root
-                        .walk_checked(&path, WalkOptions::default(), |text| check_tree(user, text))
+                        .walk_as(user, &path, WalkOptions::default())
                         .map_err(|error| error.to_string())?;
                     for entry in tree {
                         match entry {
@@ -129,7 +122,7 @@ pub(super) fn execute(
                 }
                 _ => {
                     let usage = root
-                        .usage_checked(&path, WalkOptions::default(), |text| check_tree(user, text))
+                        .usage_as(user, &path, WalkOptions::default())
                         .map_err(|error| error.to_string())?;
                     writeln!(stdout, "logical_file_bytes: {}\nfiles: {}\ndirectories: {}\nblocked_links: {}\nblocked_names: {}\nother: {}\nphysical_usage: {:?}",
                         usage.logical_file_bytes, usage.files, usage.directories, usage.blocked_links,

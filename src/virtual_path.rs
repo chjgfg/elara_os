@@ -114,6 +114,7 @@ fn validate_component(component: &str) -> Result<(), PathError> {
         || component.eq_ignore_ascii_case(crate::config::ROOTFS_DEFAULTS.transaction_directory)
         || component.eq_ignore_ascii_case(crate::config::PRIVATE_LOG_DIRECTORY)
         || component.eq_ignore_ascii_case(crate::config::PRIVATE_OWNER_DIRECTORY)
+        || component.eq_ignore_ascii_case(".elara-dir-owner")
         || component.ends_with(['.', ' '])
         || reserved
     {

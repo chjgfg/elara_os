@@ -16,12 +16,12 @@ use std::{assert, assert_eq, panic};
 #[test]
 fn background_scripts_are_real_isolated_workers_with_shared_modules_and_exit_status() {
     let (root, _) = fixture();
-    let text = transcript_in(&root,"X=parent\nsh -c 'X=child; cd /tmp; touch job-file; echo \"$X\"; pwd; exit 7' &\necho \"$X\"\npwd\njobs\nwait %1\necho $?\nexit 0\n");
+    let text = transcript_in(&root,"X=parent\nsh -c 'X=child; cd /tmp; touch /root/job-file; echo \"$X\"; pwd; exit 7' &\necho \"$X\"\npwd\njobs\nwait %1\necho $?\nexit 0\n");
     assert!(text.contains("started job: sh -c"), "{text}");
     assert!(text.contains("parent\n/\n"), "{text}");
     assert!(text.contains("child\n/tmp\n[1] exited 7\n"), "{text}");
     assert!(text.ends_with("7\nBye.\n"), "{text}");
-    assert!(root.root().join("tmp/job-file").is_file());
+    assert!(root.root().join("root/job-file").is_file());
 }
 #[test]
 fn stopped_is_acknowledged_bg_resumes_and_fg_reaps() {
@@ -41,7 +41,7 @@ fn cancellation_prevents_later_effects_and_wait_reports_observed_cancellation() 
     let before = Instant::now();
     let text = transcript_in(
         &root,
-        "sh -c 'sleep 10; touch /tmp/after-cancel' &\nkill -TERM %1\nwait %1\necho $?\nexit 0\n",
+        "sh -c 'sleep 10; touch /root/after-cancel' &\nkill -TERM %1\nwait %1\necho $?\nexit 0\n",
     );
     assert!(before.elapsed() < Duration::from_secs(2));
     assert!(text.contains("cancellation requested"), "{text}");
@@ -52,7 +52,7 @@ fn cancellation_prevents_later_effects_and_wait_reports_observed_cancellation() 
         text.matches("Error: execution cancelled").count() <= 1,
         "{text}"
     );
-    assert!(!root.root().join("tmp/after-cancel").exists());
+    assert!(!root.root().join("root/after-cancel").exists());
 }
 #[test]
 fn identity_change_joins_old_jobs_closes_capabilities_and_discards_private_output() {
@@ -79,10 +79,10 @@ fn identity_change_joins_old_jobs_closes_capabilities_and_discards_private_outpu
 fn exit_cancels_and_joins_unfinished_jobs_instead_of_leaving_detached_work() {
     let (root, _) = fixture();
     let before = Instant::now();
-    let text = transcript_in(&root, "sh -c 'sleep 10; touch /tmp/late' &\nexit 0\n");
+    let text = transcript_in(&root, "sh -c 'sleep 10; touch /root/late' &\nexit 0\n");
     assert!(text.ends_with("Bye.\n"));
     assert!(before.elapsed() < Duration::from_secs(2));
-    assert!(!root.root().join("tmp/late").exists());
+    assert!(!root.root().join("root/late").exists());
 }
 #[test]
 fn jobs_cannot_wait_on_themselves_and_authentication_never_uses_worker_stdin() {
@@ -184,7 +184,7 @@ fn asynchronous_descendants_cannot_reset_the_shared_invocation_budget() {
                 &user,
                 Spawn {
                     context: Context::new(VirtualPath::root()),
-                    program: parser::parse("touch /tmp/forbidden").unwrap(),
+                    program: parser::parse("touch /root/forbidden").unwrap(),
                     label: "touch".into(),
                     budget,
                 },
@@ -197,19 +197,19 @@ fn asynchronous_descendants_cannot_reset_the_shared_invocation_budget() {
         };
         assert_eq!(report.steps, 0);
         assert_eq!(report.status, 2);
-        assert!(!root.root().join("tmp/forbidden").exists());
+        assert!(!root.root().join("root/forbidden").exists());
         jobs.shutdown().unwrap();
     });
 }
 #[test]
 fn nested_background_jobs_share_real_descriptors_and_inherit_empty_stdin() {
     let (root, _) = fixture();
-    let text = transcript_in(&root,"fd open /tmp/job-shared create\nsh -c 'printf child | fd write 0:1; sh -c \"wc -c; touch /tmp/grandchild\" &; wait %2' &\nwait %1\nfd seek 0:1 0 start\nfd read 0:1 5\necho END\nexit 0\n");
+    let text = transcript_in(&root,"fd open /root/job-shared create\nsh -c 'printf child | fd write 0:1; sh -c \"wc -c; touch /root/grandchild\" &; wait %2' &\nwait %1\nfd seek 0:1 0 start\nfd read 0:1 5\necho END\nexit 0\n");
     assert!(text.contains("0\n[2] exited 0\n"), "{text}");
     assert!(text.contains("childEND\n"), "{text}");
-    assert!(root.root().join("tmp/grandchild").is_file());
+    assert!(root.root().join("root/grandchild").is_file());
     assert_eq!(
-        std::fs::read(root.root().join("tmp/job-shared")).unwrap(),
+        std::fs::read(root.root().join("root/job-shared")).unwrap(),
         b"child"
     );
 }
@@ -221,14 +221,25 @@ fn cancellation_crosses_nested_sh_source_and_conditionals_without_running_traps(
         let resources =
             Resources::new(user.uid, Arc::new(Logger::open(&root).unwrap()), 16).unwrap();
         let modules = SharedModules::new(&root, &user, &resources);
-        let id=jobs.spawn(&root,&user,Spawn { context:Context::new(VirtualPath::root()),program:parser::parse("trap 'touch /tmp/cancel-trap' EXIT; source -c 'sh -c \"touch /tmp/cancel-ready; sleep 10 || touch /tmp/cancel-or\"'; touch /tmp/cancel-tail").unwrap(),label:"nested".into(),budget:Arc::new(Budget::new()) },&modules).unwrap();
+        let id=jobs.spawn(&root,&user,Spawn { context:Context::new(VirtualPath::root()),program:parser::parse("trap 'touch /root/cancel-trap' EXIT; source -c 'sh -c \"touch /tmp/cancel-ready; sleep 10 || touch /root/cancel-or\"'; touch /root/cancel-tail").unwrap(),label:"nested".into(),budget:Arc::new(Budget::new()) },&modules).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while !root.root().join("tmp/cancel-ready").exists() && Instant::now() < deadline {
             std::thread::yield_now();
         }
         let entered = root.root().join("tmp/cancel-ready").exists();
         if !entered {
+            let state = jobs.snapshot(user.uid).unwrap();
             jobs.cancel(user.uid, id).unwrap();
+            let state: Vec<_> = state
+                .iter()
+                .map(|job| (job.id.number(), job.state))
+                .collect();
+            let Waited::Finished { report, cancelled } =
+                jobs.wait(user.uid, id, None, None).unwrap()
+            else {
+                panic!("nested job panicked before readiness");
+            };
+            panic!("nested interpreter must really reach its module effect; state {state:?}; cancelled {cancelled}; report {report:?}");
         }
         assert!(
             entered,
@@ -247,12 +258,75 @@ fn cancellation_crosses_nested_sh_source_and_conditionals_without_running_traps(
         assert!(cancelled);
         assert_eq!(report.status, 130);
         assert!(!String::from_utf8_lossy(&report.stderr).contains("status 2"));
-        for path in ["tmp/cancel-trap", "tmp/cancel-or", "tmp/cancel-tail"] {
+        for path in ["root/cancel-trap", "root/cancel-or", "root/cancel-tail"] {
             assert!(!root.root().join(path).exists());
         }
         jobs.shutdown().unwrap();
     });
 }
+/// An absent TaskExit name cannot prove that a command was never executed.
+/// Exercise the real interpreter and reaper, not a synthetic host-file fixture.
+#[test]
+fn side_effect_witnesses_survive_program_and_job_cleanup() {
+    for background in [false, true] {
+        let (root, user) = fixture();
+        let program = "trap 'touch /tmp/cancel-trap; touch /root/cancel-trap' EXIT; source -c 'sh -c \"touch /tmp/cancel-ready; false || touch /root/cancel-or\"'; touch /tmp/cancel-tail; touch /root/cancel-tail; mkdir /tmp/witness-dir; mkdir /root/witness-dir";
+        if background {
+            let text = transcript_in(
+                &root,
+                &std::format!(
+                    "sh -c '{0}' &\nwait %1\nexit 0\n",
+                    program.replace('\'', "'\\''")
+                ),
+            );
+            assert!(text.contains("[1] exited 0"), "{text}");
+        } else {
+            let report = crate::support::run(
+                &root,
+                &user,
+                &mut Context::new(VirtualPath::root()),
+                &["-c".into(), program.into()],
+            )
+            .unwrap();
+            assert_eq!(report.status, 0, "{report:?}");
+        }
+        for path in [
+            "tmp/cancel-trap",
+            "tmp/cancel-ready",
+            "tmp/cancel-tail",
+            "tmp/witness-dir",
+        ] {
+            assert!(
+                !root.root().join(path).exists(),
+                "temporary witness must be reclaimed: {path}"
+            );
+        }
+        for path in ["/root/cancel-trap", "/root/cancel-or", "/root/cancel-tail"] {
+            assert!(
+                root.root().join(&path[1..]).is_file(),
+                "executed side effect must remain visible: {path}"
+            );
+            let elara_os::filesystem::OwnershipState::Managed(info) =
+                root.ownership_as(&user, path).unwrap()
+            else {
+                panic!("persistent witness must be managed");
+            };
+            assert_eq!(
+                info.delete_condition,
+                elara_os::filesystem::DeleteCondition::OwnerRequest
+            );
+        }
+        let directory = root
+            .directory_info_as(&user, "/root/witness-dir")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            directory.delete_condition,
+            elara_os::filesystem::DeleteCondition::OwnerRequest
+        );
+    }
+}
+
 #[test]
 fn full_job_table_refuses_before_module_fork_and_foreground_commands_still_run() {
     struct CountFork(std::sync::atomic::AtomicUsize);
@@ -328,4 +402,83 @@ fn module_fork_refusal_does_not_publish_a_fake_job() {
         assert!(JobId::parse("%0").is_err());
         jobs.shutdown().unwrap();
     });
+}
+
+#[test]
+fn proc_jobs_commands_show_acknowledged_stop_and_reap_without_exposing_labels() {
+    let (root, user) = fixture();
+    let text = transcript_in(&root,
+        "sh -c 'sleep 30; echo private-job-body' &\nkill -STOP %1\ncat /proc/jobs/*/status\nkill -TERM %1\nwait %1\nprintf after-reap\n\nls /proc/jobs\nexit 0\n");
+    assert!(text.contains("state: Stopped\n"), "{text}");
+    assert!(text.contains("job_id: 1\n"), "{text}");
+    assert!(text.contains("kind: scoped-job\n"), "{text}");
+    assert!(text.contains("[1] cancelled 130\n"), "{text}");
+    assert!(root.list_as(&user, "/proc/jobs").unwrap().is_empty());
+    assert!(!root.root().join("proc/jobs").exists());
+}
+
+#[test]
+fn proc_legacy_timers_publish_terminal_state_without_ps_or_wait_refresh() {
+    let (root, user) = fixture();
+    let text = transcript_in(&root,
+        "sleep 0 bg\nsleep 0\ncat /proc/jobs/*/status\nexit 0\n");
+    assert!(text.contains("kind: legacy-task\n"), "{text}");
+    assert!(text.contains("task_id: 1\n"), "{text}");
+    assert!(text.contains("state: TaskExited(0)\n"), "{text}");
+    assert!(!text.contains("Error:"), "{text}");
+    assert!(root.list_as(&user, "/proc/jobs").unwrap().is_empty());
+    assert!(!root.root().join("proc/jobs").exists());
+}
+
+#[test]
+fn proc_legacy_identity_switch_retires_old_tasks_without_reusing_ids() {
+    let (root, _) = fixture();
+    let text = transcript_in(&root,
+        "useradd timeruser secret1
+sleep 30 bg
+su timeruser
+printf BEFORE
+ps
+wait 1
+sleep 0
+printf AFTER
+ps
+exit 0
+");
+    let before = text.split("BEFORE").nth(1).unwrap().split("AFTER").next().unwrap();
+    assert!(!before.contains("sleep 30"), "{text}");
+    assert!(before.contains("No task with id 1"), "{text}");
+    assert!(text.contains("[2] exited 0"), "{text}");
+}
+
+#[test]
+fn proc_executions_tracks_real_foreground_invocation_and_not_background_or_private_text() {
+    let (root, user) = fixture();
+    let report = crate::support::run(&root, &user, &mut Context::new(VirtualPath::root()),
+        &["-c".into(), "sh -c 'cat /proc/executions/*/status' private-argument".into()]).unwrap();
+    let text = String::from_utf8(report.stdout).unwrap();
+    assert_eq!(report.status, 0, "{}", String::from_utf8_lossy(&report.stderr));
+    assert!(text.contains("state: Running
+kind: foreground-execution
+"), "{text}");
+    assert_eq!(text.matches("execution_id:").count(), 1, "{text}");
+    assert!(!text.contains("private-argument"), "{text}");
+    assert!(root.list_as(&user, "/proc/executions").unwrap().is_empty());
+    assert!(!root.root().join("proc/executions").exists());
+}
+
+#[test]
+fn proc_executions_exec_streams_errors_and_scoped_workers_keep_their_boundaries() {
+    let (root, user) = fixture();
+    root.create_owned_file(&user, "/root/execution-image", b"cat /proc/executions/*/status; exit 7",
+        elara_os::filesystem::VirtualMode::new(0o700).unwrap()).unwrap();
+    let text = transcript_in(&root, "sh -c 'exec /root/execution-image'\necho AFTER_EXEC\nfalse\nunknown-command\ncat /proc/executions/*/status | wc -l\nsh -c 'ls /proc/executions; echo BG_DONE' &\nkill -STOP %1\nkill -CONT %1\nwait %1\nexit 0\n");
+    assert!(text.contains("kind: foreground-execution\n"), "{text}");
+    assert!(text.contains("Script exited with status 7."), "{text}");
+    assert!(text.contains("AFTER_EXEC"), "{text}");
+    assert!(text.contains("Unknown script command: unknown-command"), "{text}");
+    assert!(text.contains("4\n"), "{text}");
+    assert!(text.contains("BG_DONE"), "{text}");
+    assert!(root.list_as(&user, "/proc/executions").unwrap().is_empty());
+    assert!(root.list_as(&user, "/proc/jobs").unwrap().is_empty());
 }

@@ -19,12 +19,32 @@ const MIN_PASSWORD_LEN: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
+    pub identity: Identity,
     pub name: String,
     pub uid: u32,
     pub home: String,
 }
 
+/// Runtime identity is separate from the persisted account database.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Identity {
+    #[default]
+    Login,
+    Executed(ExecutionIdentity),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionIdentity {
+    pub real_uid: u32,
+    pub real_gid: u32,
+    pub effective_gid: u32,
+    pub saved_uid: u32,
+    pub saved_gid: u32,
+    pub supplementary: std::collections::BTreeSet<u32>,
+}
 impl Account {
+    pub fn session_uid(&self) -> u32 {
+        match &self.identity { Identity::Login => self.uid, Identity::Executed(id) => id.real_uid }
+    }
     pub fn is_admin(&self) -> bool {
         self.uid == ROOT_UID
     }
@@ -99,7 +119,7 @@ pub fn parse(text: &str) -> Result<Vec<Account>, UserError> {
         {
             return Err(UserError::Corrupt(index + 1));
         }
-        accounts.push(Account {
+        accounts.push(Account { identity: Default::default(),
             name: (*name).to_owned(),
             uid,
             home: (*home).to_owned(),
@@ -134,7 +154,7 @@ pub fn ensure_passwd(data_root: &DataRoot) -> Result<(), UserError> {
         Err(FsError::AlreadyExists) => return Ok(()),
         Err(error) => return Err(error.into()),
     }
-    let root = Account {
+    let root = Account { identity: Default::default(),
         name: "root".into(),
         uid: ROOT_UID,
         home: "/root".into(),
@@ -275,22 +295,21 @@ pub fn add_user(
     if accounts.iter().any(|account| account.name == name) {
         return Err(UserError::Duplicate(name.to_owned()));
     }
-    let uid = accounts
+    let mut uid = accounts
         .iter()
         .map(|account| account.uid)
         .filter(|uid| *uid >= FIRST_USER_UID)
         .max()
-        .map_or(FIRST_USER_UID, |uid| uid + 1);
+        .map_or(Some(FIRST_USER_UID), |uid| uid.checked_add(1)).ok_or(FsError::OwnershipIdentityExhausted)?;
+    let groups = data_root.groups_as(actor)?;
+    while groups.contains_key(&uid) { uid = uid.checked_add(1).ok_or(FsError::OwnershipIdentityExhausted)?; }
     let home = format!("/home/{name}");
-    match data_root.create_directory(&home) {
+    let account = Account { identity: Default::default(), name: name.to_owned(), uid, home: home.clone() };
+    match data_root.create_directory_as(&account, &home, crate::filesystem::CreationOptions::default()).map(|_| ()) {
         Ok(()) | Err(FsError::AlreadyExists) => {}
         Err(error) => return Err(error.into()),
     }
-    let account = Account {
-        name: name.to_owned(),
-        uid,
-        home,
-    };
+    if let Some(info) = data_root.directory_info_as(actor, &home)? { if info.owner.uid != uid { return Err(FsError::OwnershipDenied.into()); } }
     accounts.push(account.clone());
     data_root.write_file(PASSWD_PATH, render(&accounts).as_bytes())?;
     set_password(data_root, actor, name, password)?;
@@ -414,7 +433,7 @@ mod tests {
         let accounts = parse("root:0:/root\n\nalice:1000:/home/alice\n").unwrap();
         assert_eq!(
             accounts[1],
-            Account {
+            Account { identity: Default::default(),
                 name: "alice".into(),
                 uid: 1000,
                 home: "/home/alice".into()

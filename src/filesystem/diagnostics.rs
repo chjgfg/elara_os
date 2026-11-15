@@ -11,6 +11,7 @@ pub enum PhysicalUsage {
 pub struct Usage {
     pub files: u64,
     pub directories: u64,
+    pub symlinks: u64,
     pub blocked_links: u64,
     pub blocked_names: u64,
     pub other: u64,
@@ -18,6 +19,14 @@ pub struct Usage {
     pub physical_usage: PhysicalUsage,
 }
 impl DataRoot {
+    pub fn usage_as(
+        &self,
+        user: &crate::users::Account,
+        path: &str,
+        options: WalkOptions,
+    ) -> Result<Usage, FsError> {
+        Usage::from_entries(&self.walk_as(user, path, options)?)
+    }
     /// Includes the requested root entry. No partial result on traversal failure.
     pub fn usage(&self, path: &str, options: WalkOptions) -> Result<Usage, FsError> {
         Usage::from_entries(&self.walk(path, options)?)
@@ -41,6 +50,7 @@ impl Usage {
         let mut usage = Usage {
             files: 0,
             directories: 0,
+            symlinks: 0,
             blocked_links: 0,
             blocked_names: 0,
             other: 0,
@@ -59,6 +69,7 @@ impl Usage {
                             .ok_or(FsError::UsageOverflow)?;
                     }
                     ObjectKind::Directory => usage.directories += 1,
+                    ObjectKind::Symlink => usage.symlinks += 1,
                     ObjectKind::BlockedLink => usage.blocked_links += 1,
                     ObjectKind::Other => usage.other += 1,
                 },

@@ -6,9 +6,10 @@ use crate::tasks::{self, ExitStatus, TaskTable};
 use crate::users::{self, Account};
 use crate::virtual_path::VirtualPath;
 use std::io::Write;
-use std::{format, writeln};
+use std::{format, matches, writeln};
 
 pub struct Request<'a> {
+    pub creation: crate::filesystem::CreationOptions<'a>,
     pub name: &'a str,
     pub args: &'a [String],
     pub stdin: &'a [u8],
@@ -33,7 +34,17 @@ pub enum ModuleFork<'a> {
     Unsupported,
 }
 pub trait ModuleCommands {
+    fn task_finished(&mut self, _id: crate::filesystem::TaskScopeId) -> Result<(), String> {
+        Ok(())
+    }
     fn execute(&mut self, request: Request<'_>) -> Result<Dispatch, String>;
+    fn execute_as(&mut self, actor: &Account, request: Request<'_>) -> Result<Dispatch, String> {
+        if matches!(actor.identity, crate::users::Identity::Executed(_)) {
+            return Err("module does not support explicit execution credentials".into());
+        }
+        self.execute(request)
+    }
+
     /// Nonblocking capability clone, invoked only after scoped-job admission.
     /// Must not run scripts, perform module I/O, or re-enter the job registry.
     fn fork<'a>(
@@ -65,6 +76,24 @@ pub struct SystemModules<'a> {
     pub files: &'a mut super::fd::FdSession,
 }
 impl ModuleCommands for SystemModules<'_> {
+    fn execute_as(&mut self, actor: &Account, request: Request<'_>) -> Result<Dispatch, String> {
+        if actor.session_uid() != self.user.session_uid() {
+            return Err("module session mismatch".into());
+        }
+        SystemModules {
+            root: self.root,
+            user: actor,
+            tasks: self.tasks,
+            logger: self.logger,
+            files: self.files,
+        }
+        .execute(request)
+    }
+
+    fn task_finished(&mut self, id: crate::filesystem::TaskScopeId) -> Result<(), String> {
+        self.files.finish_scope(id);
+        Ok(())
+    }
     fn script_finished(
         &mut self,
         name: &str,
@@ -82,6 +111,7 @@ impl ModuleCommands for SystemModules<'_> {
     }
     fn execute(&mut self, request: Request<'_>) -> Result<Dispatch, String> {
         let Request {
+            creation,
             name,
             args,
             stdin,
@@ -90,18 +120,31 @@ impl ModuleCommands for SystemModules<'_> {
         let mut out = Vec::new();
         let mut status = 0;
         match name {
+            "app" | "cache" => {
+                return super::resources::execute(self.root, self.user, cwd, name, args)
+                    .map(Dispatch::Handled)
+            }
+            "vfs" => {
+                return super::vfs::execute(self.root, self.user, cwd, args).map(Dispatch::Handled)
+            }
+            "chmod" | "chgrp" | "getfacl" | "setfacl" | "groupadd" | "groupmem" | "groups" => {
+                return super::access::execute(self.root, self.user, cwd, name, args)
+                    .map(Dispatch::Handled)
+            }
             "owned" => {
-                return super::owned::execute(self.root, self.user, cwd, args)
+                return super::owned::execute(self.root, self.user, cwd, args, creation)
                     .map(Dispatch::Handled)
             }
             "mv" | "cp" | "stat" | "find" | "du" => {
-                return super::fs_commands::execute(self.root, self.user, cwd, name, args)
-                    .map(Dispatch::Handled);
+                return super::fs_commands::execute(
+                    self.root, self.user, cwd, name, args, creation,
+                )
+                .map(Dispatch::Handled);
             }
             "fd" => {
                 return self
                     .files
-                    .execute(self.root, self.user, cwd, args, stdin)
+                    .execute_with_options(self.root, self.user, cwd, args, stdin, creation)
                     .map(Dispatch::Handled)
             }
             "wc" => {
@@ -124,7 +167,7 @@ impl ModuleCommands for SystemModules<'_> {
                         .map_err(|e| e.to_string())?;
                         let data = self
                             .root
-                            .read_file(&path.to_string(), MAX_OUTPUT as u64)
+                            .read_file_as(self.user, &path.to_string(), MAX_OUTPUT as u64)
                             .map_err(|e| e.to_string())?;
                         if data.len() > MAX_OUTPUT.saturating_sub(bytes.len()) {
                             return Err("module input exceeds 64 KiB".into());
@@ -170,14 +213,15 @@ impl ModuleCommands for SystemModules<'_> {
                 if background {
                     let id = self
                         .tasks
-                        .spawn_sleep(duration)
+                        .spawn_sleep_observed(self.root, self.user.session_uid(), duration)
                         .map_err(|e| e.to_string())?;
                     writeln!(out, "[{id}] started: sleep {seconds}").map_err(|e| e.to_string())?;
                 } else {
+                    let task = self.tasks.begin_observed(self.root, self.user.session_uid(), &format!("sleep {seconds}"))
+                        .map_err(|e| e.to_string())?;
+                    let id = task.id;
                     std::thread::sleep(duration);
-                    let id = self
-                        .tasks
-                        .record_finished(&format!("sleep {seconds}"), ExitStatus::Success);
+                    task.finish(ExitStatus::Success);
                     writeln!(out, "[{id}] exited 0").map_err(|e| e.to_string())?;
                 }
             }

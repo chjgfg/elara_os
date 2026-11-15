@@ -68,11 +68,11 @@ fn failed_redirect_prevents_command_effects() {
         &root,
         &user,
         &mut ctx,
-        &["-c".into(), "mkdir /tmp/no-effect > /missing/out".into()],
+        &["-c".into(), "mkdir /root/no-effect > /missing/out".into()],
     )
     .unwrap();
     assert_ne!(report.status, 0);
-    assert!(!root.root().join("tmp/no-effect").exists());
+    assert!(!root.root().join("root/no-effect").exists());
 }
 #[test]
 fn pipeline_state_is_isolated_and_last_stage_controls_status() {
@@ -115,11 +115,11 @@ fn invalid_late_expansion_is_preflighted_before_writes() {
     let (root, user) = fixture();
     let mut ctx = Context::new(VirtualPath::root());
     for source in [
-        "touch /tmp/no-effect; echo ${x@unknown}",
-        "touch /tmp/no-effect; echo prefix\"$@\"",
+        "touch /root/no-effect; echo ${x@unknown}",
+        "touch /root/no-effect; echo prefix\"$@\"",
     ] {
         assert!(run(&root, &user, &mut ctx, &["-c".into(), source.into()]).is_err());
-        assert!(!root.root().join("tmp/no-effect").exists());
+        assert!(!root.root().join("root/no-effect").exists());
     }
 }
 #[test]
@@ -203,12 +203,12 @@ fn positional_parameters_and_quoted_at() {
 fn redirection_pipeline_and_crlf_script_file() {
     let (root, user) = fixture();
     let mut ctx = Context::new(VirtualPath::root());
-    fs::write(root.root().join("tmp/demo.sh"), b"#!/bin/sh\r\nprintf '%s\\n' a b > /tmp/out.txt\r\necho c >> /tmp/out.txt\r\ncat < /tmp/out.txt | wc -l\r\n").unwrap();
+    fs::write(root.root().join("tmp/demo.sh"), b"#!/bin/sh\r\nprintf '%s\\n' a b > /root/out.txt\r\necho c >> /root/out.txt\r\ncat < /root/out.txt | wc -l\r\n").unwrap();
     let report = run(&root, &user, &mut ctx, &["/tmp/demo.sh".into()]).unwrap();
     assert_eq!(report.status, 0);
     assert_eq!(report.stdout, b"3\n");
     assert_eq!(
-        fs::read(root.root().join("tmp/out.txt")).unwrap(),
+        fs::read(root.root().join("root/out.txt")).unwrap(),
         b"a\nb\nc\n"
     );
     assert_eq!(
@@ -233,14 +233,14 @@ fn syntax_error_and_check_mode_have_no_effects() {
         &mut ctx,
         &[
             "-c".into(),
-            "touch /tmp/must-not-exist; if true; then echo oops".into()
+            "touch /root/must-not-exist; if true; then echo oops".into()
         ]
     )
     .is_err());
-    assert!(!root.root().join("tmp/must-not-exist").exists());
+    assert!(!root.root().join("root/must-not-exist").exists());
     fs::write(
         root.root().join("tmp/check.sh"),
-        b"touch /tmp/must-not-exist\n",
+        b"touch /root/must-not-exist\n",
     )
     .unwrap();
     let report = run(
@@ -251,7 +251,7 @@ fn syntax_error_and_check_mode_have_no_effects() {
     )
     .unwrap();
     assert_eq!(report.steps, 0);
-    assert!(!root.root().join("tmp/must-not-exist").exists());
+    assert!(!root.root().join("root/must-not-exist").exists());
 }
 #[test]
 fn budgets_and_unknown_commands_fail_observably() {
@@ -323,9 +323,9 @@ fn script_exit_prevents_later_file_operations() {
         &root,
         &user,
         &mut ctx,
-        &["-c".into(), "exit 9; touch /tmp/never".into()],
+        &["-c".into(), "exit 9; touch /root/never".into()],
     )
     .unwrap();
     assert_eq!(report.status, 9);
-    assert!(!root.root().join("tmp/never").exists());
+    assert!(!root.root().join("root/never").exists());
 }

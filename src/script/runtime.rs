@@ -2,8 +2,8 @@
 use super::lexer::{self, Op, Quote, Word};
 use super::modules::{Dispatch, InputUse, ModuleCommands, Request};
 use super::parser::{Command, Join, List, Node, Pipeline};
-use crate::filesystem::{DataRoot, EntryKind, FsError};
-use crate::permissions::{self, Access};
+use crate::filesystem::{DataRoot, EntryKind};
+use crate::permissions::Access;
 use crate::users::Account;
 use crate::virtual_path::VirtualPath;
 use std::collections::BTreeMap;
@@ -73,6 +73,10 @@ pub struct Report {
 #[derive(Debug, Clone)]
 pub struct Context {
     pub cwd: VirtualPath,
+    cwd_pin: Option<crate::filesystem::WorkingDirectory>,
+    pub umask: crate::filesystem::Umask,
+    actor_uid: Option<u32>,
+    fs_task: std::sync::Arc<std::sync::OnceLock<crate::filesystem::TaskScope>>,
     vars: BTreeMap<String, String>,
     functions: BTreeMap<String, List>,
     local_frames: Vec<BTreeMap<String, Option<String>>>,
@@ -83,6 +87,65 @@ pub struct Context {
     parameters: Vec<String>,
 }
 impl Context {
+    fn bind_cwd(&mut self, root: &DataRoot, user: &Account) -> Result<(), String> {
+        if self
+            .cwd_pin
+            .as_ref()
+            .is_some_and(|pin| pin.path() == self.cwd.to_string() && pin.belongs_to(root))
+        {
+            return Ok(());
+        }
+        let pin = root
+            .working_directory_as(user, &self.cwd.to_string())
+            .map_err(|e| e.to_string())?;
+        self.cwd = VirtualPath::strict(pin.path()).map_err(|e| e.to_string())?;
+        self.cwd_pin = Some(pin);
+        Ok(())
+    }
+    fn creation(
+        &self,
+        root: &DataRoot,
+        user: &Account,
+    ) -> Result<crate::filesystem::CreationOptions<'_>, String> {
+        if self.fs_task.get().is_none() {
+            let scope = root.begin_task_as(user).map_err(|e| e.to_string())?;
+            let _ = self.fs_task.set(scope);
+        }
+        Ok(self.creation_current())
+    }
+    fn creation_current(&self) -> crate::filesystem::CreationOptions<'_> {
+        crate::filesystem::CreationOptions {
+            umask: self.umask,
+            scope: self.fs_task.get(),
+        }
+    }
+    pub fn detach_task(&mut self) {
+        self.fs_task = std::sync::Arc::new(std::sync::OnceLock::new());
+    }
+    pub fn finish_task(
+        &mut self,
+        modules: &mut dyn ModuleCommands,
+    ) -> Result<crate::filesystem::TaskRecovery, String> {
+        let task = std::mem::replace(
+            &mut self.fs_task,
+            std::sync::Arc::new(std::sync::OnceLock::new()),
+        );
+        let cell = match std::sync::Arc::try_unwrap(task) {
+            Ok(cell) => cell,
+            Err(_) => {
+                return Ok(crate::filesystem::TaskRecovery {
+                    live: 1,
+                    ..Default::default()
+                })
+            }
+        };
+        if let Some(scope) = cell.into_inner() {
+            modules.task_finished(scope.id())?;
+            scope.finish().map_err(|e| e.to_string())
+        } else {
+            Ok(Default::default())
+        }
+    }
     pub fn status(&self) -> u8 {
         self.last
     }
@@ -90,6 +153,11 @@ impl Context {
         self.last = status;
     }
     pub fn prepare_identity(&mut self, user: &Account) {
+        if self.actor_uid.is_some_and(|uid| uid != user.uid) {
+            let cwd = self.cwd.clone();
+            *self = Self::new(cwd);
+        }
+        self.actor_uid = Some(user.uid);
         self.vars
             .entry("HOME".into())
             .or_insert_with(|| user.home.clone());
@@ -103,6 +171,10 @@ impl Context {
     pub fn new(cwd: VirtualPath) -> Self {
         Self {
             cwd,
+            cwd_pin: None,
+            umask: crate::filesystem::Umask::default(),
+            actor_uid: None,
+            fs_task: std::sync::Arc::new(std::sync::OnceLock::new()),
             vars: BTreeMap::new(),
             functions: BTreeMap::new(),
             local_frames: Vec::new(),
@@ -135,7 +207,7 @@ enum InputOrigin {
 }
 struct Engine<'work, 'scope, 'env> {
     root: &'env DataRoot,
-    user: &'work Account,
+    user: Account,
     ctx: &'work mut Context,
     report: Report,
     worker: Option<super::control::Worker>,
@@ -450,7 +522,7 @@ impl Engine<'_, '_, '_> {
         let mut bytes = 0usize;
         for (field, mask) in fields {
             let values = if super::pattern::has_wildcards(&mask)? {
-                match super::globbing::expand(self.root, self.user, &self.ctx.cwd, &mask)? {
+                match super::globbing::expand(self.root, &self.user, &self.ctx.cwd, &mask)? {
                     PathExpansion::Unmatched => std::vec![field],
                     PathExpansion::Matched(paths) => paths,
                 }
@@ -709,7 +781,9 @@ impl Engine<'_, '_, '_> {
 
     fn path(&self, name: &str, access: Access) -> Result<String, String> {
         let path = self.ctx.cwd.resolve(name).map_err(|e| e.to_string())?;
-        permissions::check(self.user, &path, access).map_err(|e| e.to_string())?;
+        self.root
+            .check_io_path_as(&self.user, &path.to_string(), access)
+            .map_err(|e| e.to_string())?;
         Ok(path.to_string())
     }
     fn list(&mut self, list: &List) -> Result<Flow, String> {
@@ -752,7 +826,7 @@ impl Engine<'_, '_, '_> {
                 let label = super::interactive::audit_label(std::slice::from_ref(body.as_ref()));
                 let id = jobs.spawn(
                     self.root,
-                    self.user,
+                    &self.user,
                     super::jobs::Spawn {
                         context: self.ctx.clone(),
                         program: vec![body.as_ref().clone()],
@@ -863,8 +937,10 @@ impl Engine<'_, '_, '_> {
                     "echo", "printf", "pwd", "cd", "whoami", "cat", "wc", "ls", "mkdir", "touch",
                     "rm", "rmdir", "export", "test", "exit", "return", "break", "continue", "true",
                     "false", "ps", "sleep", "wait", "users", "log", "fd", "mv", "cp", "stat",
-                    "find", "du", "owned", "sh", "source", ".", "su", "passwd", "useradd", "clear",
-                    "help", "info", "local", "unset", "set", "trap", "jobs", "fg", "bg", "kill",
+                    "find", "du", "owned", "vfs", "app", "cache", "umask", "chmod", "chgrp",
+                    "getfacl", "setfacl", "groupadd", "groupmem", "groups", "id", "sh", "exec",
+                    "source", ".", "su", "passwd", "useradd", "clear", "help", "info", "local",
+                    "unset", "set", "trap", "jobs", "fg", "bg", "kill",
                 ]
                 .contains(&name.as_str())
                 {
@@ -984,7 +1060,7 @@ impl Engine<'_, '_, '_> {
         let completion = streaming::execute(
             stages,
             self.root,
-            self.user,
+            &self.user,
             &self.stdin,
             self.worker.as_ref(),
             MAX_OUTPUT.saturating_sub(self.report.stdout.len()),
@@ -1031,6 +1107,7 @@ impl Engine<'_, '_, '_> {
         Ok(PipelineAttempt::Executed(Flow::Next(status)))
     }
     fn pipeline(&mut self, pipeline: &Pipeline) -> Result<Flow, String> {
+        self.ctx.bind_cwd(self.root, &self.user)?;
         let buffered_reason = if pipeline.commands.len() > 1 {
             match self.attempt_stream(pipeline)? {
                 PipelineAttempt::Executed(flow) => return Ok(flow),
@@ -1206,22 +1283,32 @@ impl Engine<'_, '_, '_> {
                 let path = self.path(name, Access::Read)?;
                 redirected_input = Some(
                     self.root
-                        .read_file(&path, MAX_OUTPUT as u64)
+                        .read_file_as(&self.user, &path, MAX_OUTPUT as u64)
                         .map_err(|e| e.to_string())?,
                 );
             } else {
                 let path = self.path(name, Access::Write)?;
-                match self.root.create_file(&path) {
-                    Ok(()) | Err(FsError::AlreadyExists) => {}
-                    Err(e) => return Err(e.to_string()),
-                }
-                if redirect.op == Op::Output {
-                    self.root.write_file(&path, b"")
+                let behavior = if redirect.op == Op::Output {
+                    crate::filesystem::FileBehavior::Truncate
                 } else {
-                    self.root.append_file(&path, b"")
-                }
+                    crate::filesystem::FileBehavior::Append
+                };
+                let mode = crate::filesystem::FileMode::new(
+                    crate::filesystem::FileAccess::WriteOnly,
+                    crate::filesystem::FileCreation::IfMissing,
+                    behavior,
+                )
                 .map_err(|e| e.to_string())?;
-                output_path = Some((path, redirect.op));
+                let file = self
+                    .root
+                    .open_file_with_options(
+                        &self.user,
+                        &path,
+                        mode,
+                        self.ctx.creation(self.root, &self.user)?,
+                    )
+                    .map_err(|e| e.to_string())?;
+                output_path = Some(file);
             }
         }
         let inherited_input = self.stdin.clone();
@@ -1235,17 +1322,15 @@ impl Engine<'_, '_, '_> {
             },
         );
         let (flow, mut bytes) = result?;
-        if let Some((path, op)) = output_path {
-            match self.root.create_file(&path) {
-                Ok(()) | Err(FsError::AlreadyExists) => {}
-                Err(e) => return Err(e.to_string()),
+        if let Some(file) = output_path {
+            let mut written = 0;
+            while written < bytes.len() {
+                let n = file.write(&bytes[written..]).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    return Err("short redirection write".into());
+                }
+                written += n;
             }
-            if op == Op::Append {
-                self.root.append_file(&path, &bytes)
-            } else {
-                self.root.write_file(&path, &bytes)
-            }
-            .map_err(|e| e.to_string())?;
             bytes.clear();
         }
         Ok((flow, bytes))
@@ -1289,6 +1374,28 @@ impl Engine<'_, '_, '_> {
                 }
                 append(&mut out, format!("{}\n", self.ctx.cwd).as_bytes())?;
             }
+            "id" => {
+                if !arguments.is_empty() {
+                    return Err("Usage: id".into());
+                }
+                let credentials = self
+                    .root
+                    .credentials_as(&self.user)
+                    .map_err(|e| e.to_string())?;
+                let (real_uid, real_gid, saved_uid, saved_gid) = match &self.user.identity {
+                    crate::users::Identity::Login => (
+                        self.user.uid,
+                        credentials.gid,
+                        self.user.uid,
+                        credentials.gid,
+                    ),
+                    crate::users::Identity::Executed(id) => {
+                        (id.real_uid, id.real_gid, id.saved_uid, id.saved_gid)
+                    }
+                };
+                append(&mut out, format!("ruid={real_uid} euid={} suid={saved_uid} rgid={real_gid} egid={} sgid={saved_gid} groups={:?}
+", self.user.uid, credentials.gid, credentials.groups).as_bytes())?;
+            }
             "whoami" => {
                 if !arguments.is_empty() {
                     return Err("whoami takes no arguments".into());
@@ -1306,10 +1413,12 @@ impl Engine<'_, '_, '_> {
                     _ => return Err("cd takes one path".into()),
                 };
                 let path = self.path(path, Access::Read)?;
-                self.root
-                    .validate_directory(&path)
+                let pin = self
+                    .root
+                    .working_directory_as(&self.user, &path)
                     .map_err(|e| e.to_string())?;
-                self.ctx.cwd = VirtualPath::strict(&path).map_err(|e| e.to_string())?;
+                self.ctx.cwd = VirtualPath::strict(pin.path()).map_err(|e| e.to_string())?;
+                self.ctx.cwd_pin = Some(pin);
             }
             "cat" => {
                 if arguments.is_empty() {
@@ -1324,7 +1433,7 @@ impl Engine<'_, '_, '_> {
                             &mut out,
                             &self
                                 .root
-                                .read_file(&path, MAX_OUTPUT as u64)
+                                .read_file_as(&self.user, &path, MAX_OUTPUT as u64)
                                 .map_err(|e| e.to_string())?,
                         )?;
                     }
@@ -1337,11 +1446,17 @@ impl Engine<'_, '_, '_> {
                     _ => return Err("ls takes one directory".into()),
                 };
                 let path = self.path(path, Access::Read)?;
-                for entry in self.root.list(&path).map_err(|e| e.to_string())? {
+                for entry in self
+                    .root
+                    .list_as(&self.user, &path)
+                    .map_err(|e| e.to_string())?
+                {
                     let suffix = match entry.kind {
                         EntryKind::Directory => "/",
                         EntryKind::File => "",
                         EntryKind::BlockedLink => " [link blocked]",
+                        EntryKind::Symlink => " [symlink]",
+                        EntryKind::Device => " [virtual device]",
                     };
                     append(
                         &mut out,
@@ -1349,6 +1464,24 @@ impl Engine<'_, '_, '_> {
                     )?;
                 }
             }
+            "umask" => match arguments {
+                [] => append(
+                    &mut out,
+                    format!(
+                        "{:04o}
+",
+                        self.ctx.umask.bits()
+                    )
+                    .as_bytes(),
+                )?,
+                [value] => {
+                    let bits =
+                        u16::from_str_radix(value, 8).map_err(|_| "Usage: umask [0000..0777]")?;
+                    self.ctx.umask =
+                        crate::filesystem::Umask::new(bits).map_err(|e| e.to_string())?;
+                }
+                _ => return Err("Usage: umask [0000..0777]".into()),
+            },
             "mkdir" | "touch" | "rm" | "rmdir" => {
                 if arguments.is_empty() {
                     return Err(format!("Usage: {command} <path> [path...]"));
@@ -1356,10 +1489,25 @@ impl Engine<'_, '_, '_> {
                 for path in arguments {
                     let path = self.path(path, Access::Write)?;
                     match command.as_str() {
-                        "mkdir" => self.root.create_directory(&path),
-                        "touch" => self.root.create_file(&path),
-                        "rm" => self.root.remove_file(&path),
-                        _ => self.root.remove_directory(&path),
+                        "mkdir" => self
+                            .root
+                            .create_directory_as(
+                                &self.user,
+                                &path,
+                                self.ctx.creation(self.root, &self.user)?,
+                            )
+                            .map(|_| ()),
+                        "touch" => self
+                            .root
+                            .create_file_with_options(
+                                &self.user,
+                                &path,
+                                b"",
+                                self.ctx.creation(self.root, &self.user)?,
+                            )
+                            .map(|_| ()),
+                        "rm" => self.root.remove_file_as(&self.user, &path),
+                        _ => self.root.remove_directory_as(&self.user, &path).map(|_| ()),
                     }
                     .map_err(|e| e.to_string())?;
                 }
@@ -1436,7 +1584,9 @@ impl Engine<'_, '_, '_> {
                     self.set_var(name, value.into())?;
                 }
             }
-            "sh" | "source" | "." => return self.call_script(command, arguments, input, origin),
+            "sh" | "exec" | "source" | "." => {
+                return self.call_script(command, arguments, input, origin)
+            }
             "su" | "passwd" | "useradd" | "clear" | "help" | "info" => {
                 return Err(
                     "session controls require a standalone command without redirection".into(),
@@ -1533,12 +1683,25 @@ impl Engine<'_, '_, '_> {
                         out,
                     ));
                 }
-                match self.modules.execute(Request {
-                    name: command,
-                    args: arguments,
-                    stdin: input,
-                    cwd: &self.ctx.cwd,
-                })? {
+                let creation = if (command == "fd"
+                    && arguments.first().is_some_and(|a| a == "open" || a == "dup"))
+                    || (command == "owned" && arguments.first().is_some_and(|a| a == "create"))
+                    || command == "cp"
+                {
+                    self.ctx.creation(self.root, &self.user)?
+                } else {
+                    self.ctx.creation_current()
+                };
+                match self.modules.execute_as(
+                    &self.user,
+                    Request {
+                        creation,
+                        name: command,
+                        args: arguments,
+                        stdin: input,
+                        cwd: &self.ctx.cwd,
+                    },
+                )? {
                     Dispatch::Handled(result) => {
                         if let InputUse::Consumed(count) = result.input_use {
                             if count > input.len() {
@@ -1569,7 +1732,7 @@ impl Engine<'_, '_, '_> {
             .jobs
             .clone()
             .ok_or("scoped job control is unavailable in this execution environment")?;
-        let uid = self.user.uid;
+        let uid = self.user.session_uid();
         let mut out = Vec::new();
         if name == "jobs" {
             if !args.is_empty() {
@@ -1675,7 +1838,11 @@ impl Engine<'_, '_, '_> {
         if self.depth >= 32 {
             return Err("call depth exceeds 32".into());
         }
-        let prepared = match super::prepare(self.root, self.user, self.ctx, args) {
+        let prepared = match if name == "exec" {
+            super::prepare_executable(self.root, &self.user, self.ctx, args)
+        } else {
+            super::prepare(self.root, &self.user, self.ctx, args)
+        } {
             Ok(prepared) => prepared,
             Err(error) => {
                 append(
@@ -1687,6 +1854,94 @@ impl Engine<'_, '_, '_> {
         };
         if prepared.check {
             return Ok((Flow::Next(0), Vec::new()));
+        }
+        if name == "exec" {
+            // Replace this virtual script boundary, not a host process. Reuse
+            // control, modules, task lease, descriptors and invocation budget.
+            // Preparation failure above leaves the caller and its trap intact.
+            let super::PreparedIdentity::Executed(actor) = prepared.identity else {
+                return Err("missing executable credentials".into());
+            };
+            let old_actor = std::mem::replace(&mut self.user, actor);
+            // An executable starts a fresh function namespace. Caller-supplied
+            // bodies must never run with the image's effective credentials.
+            // Keep the old frames only to unwind an enclosing caller function.
+            let old_functions = std::mem::take(&mut self.ctx.functions);
+            let old_frames = std::mem::take(&mut self.ctx.local_frames);
+            let old_actor_uid = self.ctx.actor_uid.replace(self.user.uid);
+            // Elevated objects must never enter the old actor's task lease.
+            let old_task = std::mem::replace(
+                &mut self.ctx.fs_task,
+                std::sync::Arc::new(std::sync::OnceLock::new()),
+            );
+            self.ctx.exit_trap = None;
+            self.ctx.parameters = prepared.parameters;
+            // Route through the same command input/output boundary as sh/source:
+            // nested output must reach the caller's redirect, not report.stdout.
+            let stdout = std::mem::take(&mut self.report.stdout);
+            let previous_stdin = std::mem::replace(&mut self.stdin, input.to_vec());
+            self.depth += 1;
+            let result = self.list(&prepared.ast);
+            let result = self.finish_trap(result);
+            self.depth -= 1;
+            let remaining = std::mem::take(&mut self.stdin);
+            self.stdin = if matches!(origin, InputOrigin::Inherited) {
+                remaining
+            } else {
+                previous_stdin
+            };
+            let out = std::mem::replace(&mut self.report.stdout, stdout);
+            let cleanup = self.ctx.finish_task(self.modules);
+            self.ctx.fs_task = old_task;
+            self.ctx.functions = old_functions;
+            self.ctx.local_frames = old_frames;
+            self.ctx.actor_uid = old_actor_uid;
+            self.user = old_actor;
+            match cleanup {
+                Ok(report) if report.deferred == 0 => {}
+                Ok(report) => append(
+                    &mut self.report.stderr,
+                    format!(
+                        "Warning: exec cleanup deferred: {}
+",
+                        report.deferred
+                    )
+                    .as_bytes(),
+                )?,
+                Err(error) => append(
+                    &mut self.report.stderr,
+                    format!(
+                        "Warning: exec cleanup: {error}
+"
+                    )
+                    .as_bytes(),
+                )?,
+            }
+            let flow = match result {
+                Ok(Flow::Next(code) | Flow::Exit(code)) => Flow::Exit(code),
+                Ok(Flow::Abort(130)) if self.cancellation_observed() => Flow::Abort(130),
+                Ok(Flow::Abort(code)) => Flow::Exit(code),
+                Ok(Flow::Return(_) | Flow::Break | Flow::Continue) => {
+                    append(
+                        &mut self.report.stderr,
+                        b"Error: return/break/continue outside executable context
+",
+                    )?;
+                    Flow::Exit(2)
+                }
+                Err(error) => {
+                    append(
+                        &mut self.report.stderr,
+                        format!(
+                            "Error: {error}
+"
+                        )
+                        .as_bytes(),
+                    )?;
+                    Flow::Exit(2)
+                }
+            };
+            return Ok((flow, out));
         }
         let source = name != "sh";
         let saved = if source { None } else { Some(self.ctx.clone()) };
@@ -1788,9 +2043,11 @@ impl Engine<'_, '_, '_> {
             [op, value] if op == "-f" || op == "-d" => {
                 let path = self.path(value, Access::Read)?;
                 Ok(if op == "-f" {
-                    self.root.read_file(&path, MAX_OUTPUT as u64).is_ok()
+                    self.root
+                        .read_file_as(&self.user, &path, MAX_OUTPUT as u64)
+                        .is_ok()
                 } else {
-                    self.root.validate_directory(&path).is_ok()
+                    self.root.validate_directory_as(&self.user, &path).is_ok()
                 })
             }
             [a, op, b] if op == "=" || op == "!=" => Ok((a == b) == (op == "=")),
@@ -1836,9 +2093,10 @@ pub fn session_words(
     modules: &mut dyn ModuleCommands,
 ) -> Result<Vec<String>, String> {
     context.prepare_identity(user);
+    context.bind_cwd(root, user)?;
     let mut engine = Engine {
         root,
-        user,
+        user: user.clone(),
         ctx: context,
         modules,
         worker: None,
@@ -1930,6 +2188,7 @@ pub fn execute_job<'scope, 'env>(
     job: JobRun<'scope, 'env>,
 ) -> Report {
     context.exit_trap = None;
+    context.detach_task();
     let parameters = context.parameters.clone();
     execute_entry(
         list,
@@ -2001,6 +2260,22 @@ fn execute_entry<'scope, 'env>(
             },
         };
     }
+    // One live row per foreground invocation; sh/source/exec reuse this engine.
+    // Scoped workers already have a JobTable row and must not duplicate it here.
+    let _execution = if entry.id.is_none() {
+        match root.begin_execution(user.session_uid()) {
+            Ok(observation) => Some(observation),
+            Err(error) => return Report {
+                completion: Completion::Finished,
+                pipelines: Vec::new(), status: 2, stdout: Vec::new(),
+                stderr: format!("Error: foreground observation: {error}
+").into_bytes(),
+                steps: 0,
+                mode: ExecutionMode::InProcessBuffered { byte_limit: MAX_OUTPUT },
+            },
+        }
+    } else { None };
+    context.prepare_identity(user);
     context.parameters = parameters.to_vec();
     context
         .vars
@@ -2017,7 +2292,7 @@ fn execute_entry<'scope, 'env>(
     };
     let mut engine = Engine {
         root,
-        user,
+        user: user.clone(),
         ctx: context,
         modules,
         worker: entry.worker,
@@ -2074,5 +2349,31 @@ fn execute_entry<'scope, 'env>(
         }
     };
     engine.ctx.last = engine.report.status;
+    if matches!(entry.boundary, Boundary::Program) {
+        match engine.ctx.finish_task(engine.modules) {
+            Ok(report) if report.deferred == 0 => {}
+            Ok(report) => {
+                let _ = append(
+                    &mut engine.report.stderr,
+                    format!(
+                        "Warning: task cleanup deferred for {} objects
+",
+                        report.deferred
+                    )
+                    .as_bytes(),
+                );
+            }
+            Err(error) => {
+                let _ = append(
+                    &mut engine.report.stderr,
+                    format!(
+                        "Warning: task cleanup: {error}
+"
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+    }
     engine.report
 }

@@ -31,3 +31,14 @@ mod runtime_tests;
 mod shell_tests;
 #[path = "script/support.rs"]
 mod support;
+
+#[path = "script/execution.rs"]
+mod execution_tests;
+#[path = "script/privilege.rs"]
+mod privilege_tests;
+
+#[path = "script/vfs.rs"]
+mod vfs_tests;
+
+#[path = "script/resources.rs"]
+mod resource_tests;
