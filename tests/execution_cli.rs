@@ -580,7 +580,13 @@ fn cross_mount_real_process_saved_links_follow_internal_targets_after_restart() 
         "{second:?}"
     );
     assert_eq!(out.matches("Error:").count(), 1, "{out}");
-    assert!(out.contains("CrossDevice"), "{out}");
+    // Global links may now reach Host. Before /mnt/b is mounted its parent
+    // is absent, rather than forbidden merely for crossing backend boundaries.
+    let absent = fs::metadata(data.join("mnt/b")).unwrap_err();
+    assert_eq!(absent.kind(), std::io::ErrorKind::NotFound);
+    let expected = format!("Error: {}", elara_os::filesystem::FsError::from(absent));
+    assert!(out.contains(&expected), "{out}");
+    assert!(!data.join("mnt/b").exists());
     assert!(out.contains("initialupdatedupdated"), "{out}");
     assert_eq!(fs::read(&config).unwrap(), before);
     assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
@@ -1094,4 +1100,41 @@ exit 0");
     assert!(!fs::read_dir(data.join("var/.elara-objects"))
         .unwrap()
         .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".lease")));
+}
+
+#[test]
+fn cross_backend_real_process_links_metadata_and_image_restart() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-data")
+        .join(format!("cross-backend-{}-{nonce}", std::process::id()));
+    assert!(!parent.exists());
+    fs::create_dir_all(&parent).unwrap();
+    let parent = parent.canonicalize().unwrap();
+    let data = parent.join("data");
+    let config = parent.join("fixture.env");
+    fs::write(&config, format!("ELARA_DATA_ROOT={}\n", data.display())).unwrap();
+    let before = fs::read(&config).unwrap();
+    fs::write(parent.join("sentinel"), b"outside").unwrap();
+    elara_os::initialization::prepare(&data).unwrap();
+    let root = DataRoot::open(&data).unwrap();
+    users::ensure_passwd(&root).unwrap();
+    drop(root);
+    let first = run(&config, "vfs mount /mnt/cross 65536 64\nmkdir /root/host\nprintf host > /root/host/data\nprintf volume > /mnt/cross/data\nvfs symlink /mnt/cross/data /root/to-volume\nvfs symlink-global /root/host /mnt/cross/to-host\ncat /root/to-volume\ncat /mnt/cross/to-host/data\nvfs inode /root/host/data\nvfs inode /mnt/cross/data\ncd /mnt/cross/to-host\npwd\ncd /\nvfs save /mnt/cross /root/cross.img\necho CROSS_FIRST_OK\nexit 0");
+    let output = String::from_utf8_lossy(&first.stdout);
+    assert!(first.status.success(), "{output}");
+    assert!(!output.contains("Error:"), "{output}");
+    assert!(first.stderr.is_empty(), "{}", String::from_utf8_lossy(&first.stderr));
+    for expected in ["volume", "host", "HostFile", "Virtual", "Logical", "/root/host", "CROSS_FIRST_OK"] {
+        assert!(output.contains(expected), "missing {expected}: {output}");
+    }
+    let second = run(&config, "vfs load /root/cross.img /mnt/cross\ncat /root/to-volume\ncat /mnt/cross/to-host/data\nprintf changed > /mnt/cross/to-host/data\ncat /root/host/data\necho CROSS_RESTART_OK\nexit 0");
+    let output = String::from_utf8_lossy(&second.stdout);
+    assert!(second.status.success(), "{output}");
+    assert!(!output.contains("Error:"), "{output}");
+    assert!(second.stderr.is_empty(), "{}", String::from_utf8_lossy(&second.stderr));
+    for expected in ["volume", "host", "changed", "CROSS_RESTART_OK"] { assert!(output.contains(expected), "{output}"); }
+    assert_eq!(fs::read(data.join("root/host/data")).unwrap(), b"changed");
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
+    assert!(fs::symlink_metadata(data.join("root/to-volume")).unwrap().is_file());
 }

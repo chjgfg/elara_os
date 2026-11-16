@@ -47,8 +47,8 @@ impl DataRoot {
         let a = self.mounted_name(user, source, Access::Write)?;
         let b = self.mounted_name(user, destination, Access::Write)?;
         if !std::matches!((&a, &b), (super::vfs::Route::Host, super::vfs::Route::Host)) {
-            self.vfs
-                .rename(&self.credentials_as(user)?, source, destination, false)?;
+            let (volume, source, destination) = super::vfs_bridge::mounted_pair(a, b)?;
+            volume.rename(&self.credentials_as(user)?, &source, &destination, false)?;
             let receipt = super::vfs_bridge::volatile_receipt(0);
             return Ok(RenameReceipt {
                 source_directory: receipt.directory_durability,

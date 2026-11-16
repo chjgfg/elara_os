@@ -12,10 +12,10 @@ const HELP: &str =
 vfs pseudo proc|sys|dev PATH
 vfs unmount PATH
 vfs mounts (User or System provider)
-vfs inode PATH
+vfs inode PATH (typed Host/volume identity, registered names, Host timestamps or logical ticks)
 vfs link SOURCE DEST (same volume, or managed Host regular files in one resource domain)
 vfs symlink TARGET DEST (internal: volume-relative; Host: link-parent-relative or virtual-root-absolute; max 40)
-vfs symlink-global TARGET DEST (absolute internal namespace target; no host fallback)
+vfs symlink-global TARGET DEST (absolute virtual namespace target; Host and internal volumes; shared max 40)
 vfs readlink PATH
 vfs rename SOURCE DEST (same backend; managed Host files or empty target directory; old FDs survive)
 vfs stats PATH (logical bytes, allocated data pages, COW copies and IO)

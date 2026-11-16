@@ -562,7 +562,7 @@ impl DataRoot {
         self.validate_directory_unchecked(path)
     }
     pub fn list_as(&self, user: &Account, path: &str) -> Result<Vec<super::Entry>, FsError> {
-        let mounted = !std::matches!(self.vfs.route(path)?, super::vfs::Route::Host);
+        let mounted = !std::matches!(self.mounted(user, path, Access::Read)?, super::vfs::Route::Host);
         let mut cursor = self.open_directory_as(user, path)?;
         let mut entries = Vec::new();
         while cursor.position() < cursor.len() {

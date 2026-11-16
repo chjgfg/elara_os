@@ -5,6 +5,7 @@ pub use archive::VolumeAccess;
 mod model;
 mod registry;
 mod resolution;
+pub(crate) use resolution::Node as ResolutionNode;
 mod volume;
 pub use model::{Error, InodeKind, InodeStat, Limits, LockMode, ShareMode, Stats};
 pub use registry::{MountInfo, MountKind, Registry, Route};

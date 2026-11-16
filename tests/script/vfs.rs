@@ -352,9 +352,9 @@ fn sealed_checkpoint_acl_mask_controls_key_admission() {
 }
 
 #[test]
-fn cross_mount_commands_read_write_fd_cwd_names_and_host_refusal() {
+fn cross_mount_commands_read_write_fd_cwd_names_and_host_resolution() {
     let (root, user) = fixture();
-    let source = "vfs mount /mnt/a 65536 64; vfs mount /mnt/b 65536 64; mkdir /mnt/b/d; printf target > /mnt/b/d/file; vfs symlink-global /mnt/b/d /mnt/a/dir; cat /mnt/a/dir/file; printf changed > /mnt/a/dir/file; fd open /mnt/a/dir/file read; fd read 0:1 32; fd closeall; cd /mnt/a/dir; pwd; cd /; vfs symlink-global /mnt/b/d/file /mnt/a/link; vfs readlink /mnt/a/link; mv /mnt/a/link /mnt/a/moved; rm /mnt/a/moved; cat /mnt/b/d/file; vfs symlink-global /root/private /mnt/a/host; cat /mnt/a/host; echo DONE";
+    let source = "vfs mount /mnt/a 65536 64; vfs mount /mnt/b 65536 64; mkdir /mnt/b/d; printf target > /mnt/b/d/file; vfs symlink-global /mnt/b/d /mnt/a/dir; cat /mnt/a/dir/file; printf changed > /mnt/a/dir/file; fd open /mnt/a/dir/file read; fd read 0:1 32; fd closeall; cd /mnt/a/dir; pwd; cd /; vfs symlink-global /mnt/b/d/file /mnt/a/link; vfs readlink /mnt/a/link; mv /mnt/a/link /mnt/a/moved; rm /mnt/a/moved; cat /mnt/b/d/file; printf host > /root/private; vfs symlink-global /root/private /mnt/a/host; cat /mnt/a/host; echo DONE";
     let report = run(
         &root,
         &user,
@@ -369,13 +369,12 @@ fn cross_mount_commands_read_write_fd_cwd_names_and_host_refusal() {
         err.as_ref(),
         "Warning: committed; source directory durability unconfirmed: Unsupported
 Warning: committed; destination directory durability unconfirmed: Unsupported
-Error: virtual filesystem: CrossDevice
 "
     );
     assert!(out.contains("target"), "{out}");
     assert!(out.contains("/mnt/b/d\n"), "{out}");
     assert!(out.contains("/mnt/b/d/file"), "{out}");
-    assert!(out.contains("changedDONE"), "{out}");
+    assert!(out.contains("changedhostDONE"), "{out}");
     assert_eq!(
         root.read_file_as(&user, "/mnt/b/d/file", 32).unwrap(),
         b"changed"

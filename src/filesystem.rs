@@ -19,6 +19,7 @@ mod metadata;
 mod modes;
 mod namespace;
 mod namespace_access;
+mod namespace_resolution;
 mod objects;
 mod open;
 mod owned_access;
@@ -61,7 +62,7 @@ pub use log_store::{
     LogBudget, LogCommit, LogDataDurability, LogMode, LogPolicy, LogStats, LogWriteProgress,
     MirrorStatus,
 };
-pub use metadata::{FileStat, ObjectKind, Timestamp};
+pub use metadata::{FileStat, InodeAccess, InodeIdentity, InodeMetadata, InodeTimes, LinkCount, ObjectKind, Timestamp};
 pub use modes::{FileAccess, FileBehavior, FileCreation, FileMode};
 pub use namespace::RenameReceipt;
 pub use objects::{FileInfo, FilePosition, OpenFile};

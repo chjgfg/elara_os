@@ -232,55 +232,8 @@ impl DataRoot {
         access: Access,
         follow: bool,
     ) -> Result<Route, FsError> {
-        super::ownership::user_path(actor, path, access)?;
-        if matches!(self.vfs.route(path)?, Route::Host) {
-            return Ok(Route::Host);
-        }
-        if matches!(access, Access::Write) {
-            self.ensure_write_class(path)?;
-        }
-        let credentials = self.credentials_as(actor)?;
-        let mut proc_refreshed = false;
-        let mut jobs_refreshed = false;
-        let mut executions_refreshed = false;
-        let route = self.vfs.resolve_as(&credentials, path, follow, |target| {
-            super::ownership::user_path(actor, target, access).map_err(|_| vfs::Error::Denied)?;
-            let proc_target = if cfg!(windows) {
-                target.to_ascii_lowercase()
-            } else {
-                target.to_owned()
-            };
-            if !proc_refreshed
-                && (proc_target == "/proc"
-                    || proc_target == "/proc/tasks"
-                    || proc_target.starts_with("/proc/tasks/"))
-            {
-                self.refresh_proc_tasks().map_err(|_| vfs::Error::Busy)?;
-                proc_refreshed = true;
-            }
-            if !jobs_refreshed
-                && (proc_target == "/proc"
-                    || proc_target == "/proc/jobs"
-                    || proc_target.starts_with("/proc/jobs/"))
-            {
-                self.refresh_proc_jobs().map_err(|_| vfs::Error::Busy)?;
-                jobs_refreshed = true;
-            }
-            if !executions_refreshed && (proc_target == "/proc"
-                || proc_target == "/proc/executions" || proc_target.starts_with("/proc/executions/")) {
-                self.refresh_proc_executions().map_err(|_| vfs::Error::Busy)?;
-                executions_refreshed = true;
-            }
-            if matches!(access, Access::Write) {
-                self.ensure_write_class(target)
-                    .map_err(|_| vfs::Error::Denied)?;
-            }
-            Ok(())
-        })?;
-        if matches!(access, Access::Write) && !matches!(route, Route::Host) {
-            self.ensure_write_class(path)?;
-        }
-        Ok(route)
+        let guard = self.namespace_guard()?;
+        Ok(self.resolve_namespace_locked(actor, path, access, follow, &guard)?.route)
     }
     pub fn symlink_global_as(
         &self,
@@ -288,25 +241,16 @@ impl DataRoot {
         target: &str,
         path: &str,
     ) -> Result<(), FsError> {
+        if !target.starts_with('/') || target.len() > 4096 {
+            return Err(FsError::InvalidPath);
+        }
+        crate::virtual_path::VirtualPath::strict(target).map_err(|_| FsError::InvalidPath)?;
         match self.mounted_name(actor, path, Access::Write)? {
             Route::Mounted { volume, path, .. } => {
                 volume.symlink_global(&self.credentials_as(actor)?, target, &path)?;
                 Ok(())
             }
-            Route::Host => Err(vfs::Error::Unsupported.into()),
-        }
-    }
-    pub fn inode_as(
-        &self,
-        actor: &Account,
-        path: &str,
-        follow: bool,
-    ) -> Result<vfs::InodeStat, FsError> {
-        match self.mounted_follow(actor, path, Access::Read, follow)? {
-            Route::Mounted { volume, path, .. } => {
-                Ok(volume.stat(&self.credentials_as(actor)?, &path, follow)?)
-            }
-            Route::Host => Err(vfs::Error::Unsupported.into()),
+            Route::Host => self.create_host_symlink(actor, target, path),
         }
     }
     pub fn hardlink_as(
@@ -320,9 +264,8 @@ impl DataRoot {
         if std::matches!((&a, &b), (Route::Host, Route::Host)) {
             return self.hardlink_owned_file(actor, source, destination);
         }
-        Ok(self
-            .vfs
-            .link(&self.credentials_as(actor)?, source, destination)?)
+        let (volume, source, destination) = mounted_pair(a, b)?;
+        Ok(volume.link(&self.credentials_as(actor)?, &source, &destination)?)
     }
     pub fn symlink_as(&self, actor: &Account, target: &str, path: &str) -> Result<(), FsError> {
         match self.mounted_name(actor, path, Access::Write)? {
@@ -352,9 +295,8 @@ impl DataRoot {
         if matches!((&from, &to), (Route::Host, Route::Host)) {
             return self.rename_replace_host_as(actor, source, destination);
         }
-        Ok(self
-            .vfs
-            .rename(&self.credentials_as(actor)?, source, destination, true)?)
+        let (volume, source, destination) = mounted_pair(from, to)?;
+        Ok(volume.rename(&self.credentials_as(actor)?, &source, &destination, true)?)
     }
     pub fn volume_stats_as(&self, actor: &Account, path: &str) -> Result<vfs::Stats, FsError> {
         match self.mounted(actor, path, Access::Read)? {
@@ -479,5 +421,14 @@ pub(super) fn virtual_stat(stat: vfs::InodeStat) -> FileStat {
         modified: Timestamp::Unavailable(std::io::ErrorKind::Unsupported),
         accessed: Timestamp::Unavailable(std::io::ErrorKind::Unsupported),
         host_readonly: false,
+    }
+}
+
+/// Mutations keep the resolved volume pinned and never re-route the original alias.
+pub(super) fn mounted_pair(a: Route, b: Route) -> Result<(Arc<vfs::Volume>, String, String), FsError> {
+    match (a, b) {
+        (Route::Mounted { volume: a, path: source, .. }, Route::Mounted { volume: b, path: destination, .. })
+            if Arc::ptr_eq(&a, &b) => Ok((a, source, destination)),
+        _ => Err(vfs::Error::CrossDevice.into()),
     }
 }

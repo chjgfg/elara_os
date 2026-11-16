@@ -4,7 +4,7 @@
 
 ## 1. 入口与模块边界
 
-- 核对日期：2026-11-16。最新完整冻结基线为[620项](filesystem.md#host-cwd-2026-11-16)；打开对象身份、Host协作锁与硬链接专项、默认实跑、全目标回归均通过。下文390/408/489项为历史快照，不套用到当前增量。
+- 核对日期：2026-11-16。最新完整冻结基线为[627项](filesystem.md#cross-backend-2026-11-16)；打开对象身份、Host协作锁与硬链接专项、默认实跑、全目标回归均通过。下文390/408/489项为历史快照，不套用到当前增量。
 - [README](../README.md)、[命令账本](ubuntu-style-commands.md)、[脚本专题](shell-scripting.md)、[文件系统专题](filesystem.md)。
 - [fd.rs](../src/script/fd.rs)：参数、权限检查、会话所有者、文本令牌与结果报告。
 - [modules.rs](../src/script/modules.rs)：把 `fd` 分派给同一个会话的适配器。

@@ -4,13 +4,13 @@
 
 ## 完整能力账本
 
-**当前增量：2026-11-15。** 最新完整冻结基线为596 passed / 0 failed（379核心、183脚本、34其余），严格Clippy与默认构建通过，详见[Host覆盖rename验收](#host-rename-2026-11-15)。打开对象身份比较、Host协作锁与硬链接专项、默认程序实跑通过。下述边界不以测试数替代九层完成率。
+**当前增量：2026-11-16。** 最新完整冻结基线为627 passed / 0 failed（400核心、189脚本、38其余），严格Clippy与默认程序双进程实跑通过，详见[跨后端解析验收](#cross-backend-2026-11-16)。不以测试数替代九层完成率。
 
 “基础已有”不等于整项完成；宿主实现不等于自有磁盘格式或独立内核实现。后续按依赖顺序持续推进，不删掉尚未完成的项。
 
 | 序 | 能力 | 当前状态 / 剩余工作 |
 |---|---|---|
-| 1 | VFS 路径与命名空间 | 内部 Registry 最长前缀解析已接；cwd pin、嵌套挂载与挂载目录遍历已验收，显式symlink-global跨内部挂载已验收，Host目标拒绝。 |
+| 1 | VFS 路径与命名空间 | 内部 Registry 最长前缀解析已接；cwd pin、嵌套挂载与挂载目录遍历已验收，显式symlink-global与Host双向链接、统一40次预算已通过[627项全量](#cross-backend-2026-11-16)。 |
 | 2 | 目录对象与遍历 | 固定目录句柄、快照分页/定位/刷新、有界树遍历已实现；Unix 原生未测 |
 | 3 | 文件对象与句柄表 | 共享对象、代际/表身份校验、重复句柄、会话退出与账号切换释放已实现并接 fd；任务 FD 引用回收已接，当前权限/生命周期及sticky矩阵408/408通过，见文末最终矩阵 |
 | 4 | 打开模式 | 类型化 access/creation/behavior、独占创建与统一分类门已实现并接 fd |
@@ -853,7 +853,7 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 
 - 修订：此前“Host目录统一模型未接”已被共用InodeTable迁移取代。文件与目录仍有不同ID域和持久catalog；目录只允许一个名称，不将其描述为全部对象持久协议合并。byxaq1hn2严格Clippy及35项相关测试通过，旧目录JSON字节兼容。
 - Host链接是V7 inode的typed Symlink与字面target，物理载体仍为虚拟根内普通文件；不创建或放行宿主原生symlink/reparse point。普通单名V1–V5、多名V6字节兼容；V7可规范往返，链接不允许硬链接别名。
-- 读、写、FD、执行捕获、ACL与目录路径使用同一namespace锁内逐段解析。rename/unlink/readlink/stat不跟随最终名称，目录父路径仍解析；Exclusive open不跟随最终链接。相对target以链接所在目录为基准，绝对target以虚拟根为基准；dot在展开过程中处理，预算40次。Host与内部挂载之间目前仍CrossDevice，不能把本轮称为跨后端任意链接实现。
+- 读、写、FD、执行捕获、ACL与目录路径使用同一namespace锁内逐段解析。rename/unlink/readlink/stat不跟随最终名称，目录父路径仍解析；Exclusive open不跟随最终链接。相对target以链接所在目录为基准，绝对target以虚拟根为基准；dot在展开过程中处理，预算40次。本节历史版本Host与内部挂载之间仍CrossDevice；后续跨后端增量见[共享解析与统一元数据](#cross-backend-2026-11-16)，不把后续能力追记为本节旧验收结果。
 - 目录观察区分Symlink与BlockedLink；固定目录游标刷新在自身根能力持锁期间核验普通载体与私有payload身份，不凭相同字节或路径认领链接。镜像及密钥直读也在既有锁内解析并重验资源、策略与协作锁。
 - 已实测：原未实现版本3项均在Vfs(Unsupported)处红；接入后首轮3项通过15.56s。扩展批次严格Clippy通过、7项6通过/1失败，失败为初次目录投影拿原根guard验证克隆根导致InvalidRoot，现已按实际guard门修复，未放松根身份检查。
 - bbrk9hop5最终验收：严格Clippy10.78s，8项Host行为78.60s、真实双进程1项12.31s、6项编码契约0.01s全部通过，默认build34.50s；前后源码指纹2115a79cd1bbcb8521d0c54f58b92b98bf17b64f5c2caa23cffc2e052347c86a一致，HOST_SYMLINKS_RECOVERY_VALIDATED、exit0。编译增量目录曾报PermissionDenied/os5警告但编译成功，不隐去该环境问题。
@@ -896,3 +896,19 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 - 负对照bxvz4qf6r：1项失败，独立DataRoot删除被钉住目录没有返回Busy。扩展专项bhdw4870r已通过：Clippy19.15s，4核心24.26s、1真实双进程9.88s、1脚本5.41s、12项旧Host锁267.46s，共18项。随后补V3活跃租约升级、TaskExit延期回收及共享满额守卫，并将后代检查收敛为一次相关集合扫描；收口专项bzxqr3r9c通过：Clippy7.41s，6核心27.88s、1真实双进程10.46s、1脚本6.42s、1共享容量470.64s，共9项，0 failed/0 ignored。全量bqnmhrxmt：默认build40.38s及默认两进程占用/释放/重启实跑通过；618 passed / 1 failed，唯一失败为tilde语法测试以宿主API创建未知目录而被新cwd门拒绝。修改前指纹与启动一致；修订夹具为受管创建，原stdout断言保留并增强status/stderr，新增未知目录拒绝且不接管守卫。复验b5laf7dv6已通过，见下方独立验收记录；保留本次失败和夹具修订依据。
 
 - 最终冻结复验b5laf7dv6：严格Clippy1.48s；全部glob专项8项11.29s；all-targets共620 passed / 0 failed / 0 ignored（394核心938.66s、189脚本374.18s、37其他）。前后166个src/tests/Cargo文件指纹均为e516688bb017b442b89b09ec893a6744a6c486f2a9abc37ecb1b9b5aba425fd4，FAILURES []、HOST_CWD_FINAL_ALL_TARGETS_VALIDATED、exit0。默认程序双进程已在bqnmhrxmt验证相同生产代码，输出DEFAULT_HOST_CWD_VALIDATED；后续仅修订测试。此620项为当前完整冻结基线，不代表跨后端链接、live overlay、网络FS或其余九层缺项已完成。Windows目录同步PermissionDenied与Linux/真实断电验证缺口仍保留。
+
+<a id="cross-backend-2026-11-16"></a>
+## 跨后端解析与统一元数据（627项全目标冻结回归及默认实跑通过）
+
+入口：[共享逐段解析](../src/filesystem/namespace_resolution.rs)、[Host解析门](../src/filesystem/host_symlinks.rs)、[统一元数据](../src/filesystem/metadata.rs)、[行为守卫](../tests/filesystem/host_symlinks.rs)、[元数据守卫](../tests/filesystem/metadata.rs)、[真实进程重启](../tests/execution_cli.rs)。
+
+- DataRoot门面现在共用逐段walker；Host虚拟链接和内部全局链接可双向跳转，整个解析共享40次预算。普通内部链接仍以卷根解释绝对目标，不通过`..`越过卷根；Host绝对目标以虚拟根解释。dot先检查当前目录/搜索权限再归约，禁止file/../x或denied/../x绕过。
+- 原始Host路径及落到Host的跨卷别名，均在真正读写/改名的namespace guard内重新解析、复验身份；先前分派观察不授予修改权限。纯Registry没有Host能力，仍拒绝Host目标，不偷偷打开宿主路径。挂载对象在本次walk期间保持引用，目标卷由返回Route持有。
+- 最终名称nofollow语义保留：unlink/readlink/rename/Exclusive create操作链接本身，普通读写与cwd跟随。hardlink/rename使用解析后的同卷路径，Host分支再走原事务；不同卷或Host↔卷拒绝CrossDevice，绝不复制删除。
+- proc任务刷新改为接收已有guard，避免共享walker下递归获取命名锁；jobs/executions仍使用原观察源。内置系统写策略与身份搜索门保持，跨后端不授予额外权限、不放行宿主原生链接。
+- `vfs inode PATH`返回InodeMetadata：身份为HostFile(ObjectId)、HostDirectory(ID)、Virtual(filesystem,inode)、ProtectedLayout或Unknown。Host数字ID仅在同一数据根协议内可比，不是OS inode、不是跨数据根全局ID；Unknown/ProtectedLayout不是对象相同的证据。
+- 元数据权限为Managed(owner,mode)、ProtectedLayout或Unknown；名称计数Known仅统计登记的公开名称，不把payload/marker私有硬链接计入。Host时间为真实Timestamp/Unavailable，内部时间为Logical mutation ticks；不伪造宿主uid、nlink或统一wall-clock。Host元数据投影复用原stat身份/未知别名门，在同一guard内完成，不接管未知对象。
+- 证据：b9zr1i6iw旧实现两项行为负对照失败；接入后b4866h4zy严格Clippy与两项跨后端测试通过，脚本1通过/1失败（系统写拒绝错误类型变更，已恢复原Denied映射，未降低断言）。bvnhnf390的Host inode负对照在Unsupported处失败。扩展专项bhugbemf1通过：严格Clippy14.72s；cross_backend核心4项22.13s（含原跨后端硬链接拒绝测试）、真实CLI重启1项9.92s、统一inode3项4.41s、跨挂载脚本2项5.46s、原Host链接8项63.32s、系统provider13项8.22s，共31项，0失败，CROSS_BACKEND_METADATA_TARGETED_OK、exit0。Windows incremental finalize os5警告仍保留。b2simxdmq已启动默认构建、默认程序两进程和all-targets前后源码指纹冻结验收，完整结果为626通过/1失败，167文件前后指纹一致；唯一失败为旧真实进程测试仍期待未挂载目标CrossDevice，新行为为NotFound，后续挂载读写正常。已修订该历史预期，保留错误数量和精确数据断言并增加无Host影子目录检查；生产代码未改，复验前不升级620项完整基线。
+- 未完成：文件/目录持久catalog统一迁移及跨数据根持久统一身份协议；本节只是统一解析与显式元数据投影，不宣称原第2项全部完成。设备写例外仍仅限既有内置dev入口，不将路径链接当作新增设备写授权。其余应用隔离、自动缓存驱逐、透明写回、空间总账、共享磁盘快照、live overlay、透明块加密/全局去重和网络FS继续在原计划内。
+
+- 最终复验bjlbvnect：Clippy1.55s、修订的真实重启守卫1项4.23s；all-targets627 passed / 0 failed / 0 ignored（400核心1079.86s、189脚本387.37s、38其他），前后167文件指纹f8649b1e812880ec47aff4177cd8b56e8867dff6727949d15de9f7bbc6e5384d一致，FAILURES []、CROSS_BACKEND_FINAL_FULL_VALIDATED、exit0。默认程序在b2simxdmq已验证相同生产代码双进程往返，DEFAULT_CROSS_BACKEND_VALIDATED；只修测试预期后全量复验通过，保留历史626/1失败。目录同步PermissionDenied和incremental os5警告未宣称解决。

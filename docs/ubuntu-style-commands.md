@@ -478,10 +478,10 @@ vfs unmount /mnt/restored
 |---|---|
 | `vfs mount PATH BYTES INODES` | root 登记新 /mnt/NAME 内存卷，或在已有内部卷的目录下登记新名字的嵌套卷；不覆盖已有宿主/卷内对象；BYTES 为逻辑 payload 上限，INODES 包含根 inode |
 | `vfs mounts` / `vfs unmount PATH` | 列出内部挂载／卸载；有解析 pin、文件或目录租约时 Busy；不是宿主 umount |
-| `vfs inode PATH` / `vfs stats PATH` | inode 元数据／卷字节、inode、目录项与读写计数；不伪造物理占用 |
+| `vfs inode PATH` / `vfs stats PATH` | 统一Host/卷元数据（显式身份域、未知归属与不同时间语义）／卷字节、inode、目录项与读写计数；不伪造物理占用 |
 | `vfs link SOURCE DEST` | 同内部卷或同Host受管普通文件硬链接，目录拒绝，跨后端 CrossDevice；Host必须对象所有者/root、同存储类别/资源域且目标不存在；[27项专项、默认实跑及573项全量通过](filesystem.md#host-hardlinks-2026-11-15) |
-| `vfs symlink TARGET DEST` / `vfs readlink PATH` | 内部卷绝对目标以卷根解释；Host受管链接绝对目标以虚拟根解释、相对目标以链接父目录解释，最多40次；Host增量[专项及默认程序实跑通过](filesystem.md#host-symlinks-2026-11-15)，跨Host/内部卷仍拒绝 |
-| `vfs symlink-global TARGET DEST` | 显式绝对内部命名空间链接；仅解析到已注册内部挂载，不回落Host；核心、脚本及实际进程已验收 |
+| `vfs symlink TARGET DEST` / `vfs readlink PATH` | 内部卷绝对目标以卷根解释；Host受管链接绝对目标以虚拟根解释、相对目标以链接父目录解释，最多40次；Host增量[专项及默认程序实跑通过](filesystem.md#host-symlinks-2026-11-15)；后续[跨Host/内部卷共享解析](filesystem.md#cross-backend-2026-11-16)627项全目标冻结回归及默认程序实跑通过 |
+| `vfs symlink-global TARGET DEST` | 显式绝对虚拟命名空间链接；可在DataRoot门面跨Host/内部卷，整个walk共享40次预算；[当前验收状态](filesystem.md#cross-backend-2026-11-16) |
 | `vfs rename SOURCE DEST` | 同内部卷或受管Host覆盖rename；旧目标FD和其余硬链接保留；不同类型/非空目录/跨域拒绝；[Host专项与真实双进程通过](filesystem.md#host-rename-2026-11-15) |
 | `vfs quota PATH UID BYTES INODES` | root 设置 UID 配额；已用量超过新限额则事务失败 |
 | `vfs snapshot SOURCE DEST` / `vfs clone SOURCE DEST` | 卷根复制元数据／索引并共享不可变 4KiB 数据页；snapshot 只读，clone 可写；冻结快照经保存/重载保留只读属性；独立镜像间不共享磁盘块 |
@@ -578,7 +578,7 @@ cat /mnt/restored/file
 
 ### 跨内部挂载链接（已验收）
 
-`vfs symlink-global /mnt/data/file /mnt/front/link`创建显式全局虚拟链接；`vfs symlink file /mnt/front/local`仍按原有卷内规则解释。读写和`cd`可跟随跨挂载目标；`rm`删除链接本身，`vfs readlink`输出原字符串。目标尚未挂载或落在Host后端时返回`CrossDevice`；该命令不创建宿主链接。不同卷之间的`mv`/硬链接仍拒绝。详见[跨挂载解析边界](filesystem.md#cross-mount-links-2026-11-15)。
+`vfs symlink-global /mnt/data/file /mnt/front/link`创建显式全局虚拟链接；`vfs symlink file /mnt/front/local`仍按原有卷内规则解释。读写和`cd`可跟随跨挂载目标；`rm`删除链接本身，`vfs readlink`输出原字符串。历史版本目标落到Host时返回`CrossDevice`；后续[共享解析增量](filesystem.md#cross-backend-2026-11-16)支持受权限和身份门约束的Host落点，缺失目标仍报不存在；该命令不创建宿主原生链接。不同卷之间的`mv`/硬链接仍拒绝。详见[跨挂载解析边界](filesystem.md#cross-mount-links-2026-11-15)。
 
 ### 虚拟任务租约目录
 

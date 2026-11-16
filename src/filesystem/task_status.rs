@@ -19,10 +19,10 @@ pub struct TaskLeaseStatus {
     pub state: TaskLeaseState,
 }
 impl DataRoot {
-    pub(super) fn refresh_proc_tasks(&self) -> Result<(), FsError> {
+    pub(super) fn refresh_proc_tasks_locked(&self, guard: &super::transaction::NamespaceGuard<'_>) -> Result<(), FsError> {
         // Serialize observation and publication together, not two independent
         // snapshots that could publish in reversed order.
-        let _guard = self.namespace_guard()?;
+        guard.require_root(self)?;
         let catalog = self.load_access_catalog()?;
         let mut rows = Vec::with_capacity(catalog.tasks.len());
         for (id, uid) in catalog.tasks {

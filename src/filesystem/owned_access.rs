@@ -190,25 +190,31 @@ impl DataRoot {
         let path = user_path(user, path, Access::Read)?.to_string();
         let guard = self.namespace_guard()?;
         let path = self.resolve_host_locked(user, &path, Access::Read, false, &guard)?;
+        self.stat_host_locked(user, &path, &guard)
+    }
+    pub(super) fn stat_host_locked(
+        &self, user: &Account, path: &str, guard: &super::transaction::NamespaceGuard<'_>,
+    ) -> Result<FileStat, FsError> {
+        guard.require_root(self)?;
         let access = self.load_access_catalog()?;
-        self.search_locked(user, &path, &access)?;
-        if let Some(info) = self.directory_at_locked(&path, &access)? {
+        self.search_locked(user, path, &access)?;
+        if let Some(info) = self.directory_at_locked(path, &access)? {
             self.directory_access_locked(user, &info, 1, &access)?;
         }
         if let Some(store) = self.existing_owner_store()? {
             let catalog = self.load_owner_catalog(&store)?;
-            let canonical = key(&path)?;
+            let canonical = key(path)?;
             if let Some(info) = catalog.entries.get(&canonical) {
                 if info.kind.is_regular() { self.authorize_file(user, &info, true, false)?; }
-                self.verify_public_binding(&info, &guard)?;
+                self.verify_public_binding(&info, guard)?;
                 if let super::HostFileKind::Symlink { target } = info.kind {
-                    let mut stat = self.stat(&path)?;
+                    let mut stat = self.stat(path)?;
                     stat.kind = super::ObjectKind::Symlink;
                     stat.length = target.len() as u64;
                     return Ok(stat);
                 }
             } else {
-                let relative = VirtualPath::strict(&path)
+                let relative = VirtualPath::strict(path)
                     .map_err(|_| FsError::InvalidPath)?
                     .as_relative();
                 if self
@@ -217,7 +223,7 @@ impl DataRoot {
                     .is_ok_and(|metadata| metadata.is_file())
                 {
                     for info in catalog.entries.values() {
-                        if self.compare_relative_objects(&relative, &payload(&info), &guard)?
+                        if self.compare_relative_objects(&relative, &payload(&info), guard)?
                             != ObjectBinding::DifferentObject
                         {
                             return Err(FsError::OwnershipBindingUnconfirmed);
@@ -226,7 +232,7 @@ impl DataRoot {
                 }
             }
         }
-        self.stat(&path)
+        self.stat(path)
     }
     pub fn ownership_as(&self, user: &Account, path: &str) -> Result<OwnershipState, FsError> {
         if let super::vfs::Route::Mounted { volume, path, .. } =

@@ -4,7 +4,7 @@ use crate::filesystem::Credentials;
 use std::collections::VecDeque;
 use std::{format, unreachable, vec};
 
-pub(super) enum Node {
+pub(crate) enum Node {
     Object,
     Link { target: String, global: bool },
 }

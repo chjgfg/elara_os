@@ -414,7 +414,7 @@ impl Volume {
             )
         })
     }
-    pub(super) fn resolution_node(
+    pub(crate) fn resolution_node(
         &self,
         actor: &Credentials,
         path: &str,

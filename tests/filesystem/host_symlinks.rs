@@ -258,8 +258,10 @@ fn host_symlinks_search_permissions_are_not_erased_by_parent_components() {
         .unwrap();
     assert!(matches!(
         root.read_file_as(&user, "/tmp/cross", 8),
-        Err(FsError::Vfs(vfs::Error::CrossDevice))
+        Err(FsError::Vfs(vfs::Error::NotFound))
     ));
+    root.create_owned_file(&user, "/mnt/ram/data", b"cross", VirtualMode::new(0o600).unwrap()).unwrap();
+    assert_eq!(root.read_file_as(&user, "/tmp/cross", 8).unwrap(), b"cross");
 }
 #[test]
 fn host_symlinks_stat_cursor_refresh_and_nofollow_operations_observe_link_inode() {
@@ -436,4 +438,74 @@ fn host_symlinks_image_io_obeys_target_binding_lock_and_resource_lifetime() {
     assert!(!path.join("root/app-data/key").exists());
     assert!(matches!(root.create_block_image_as(&user, "/mnt/a", "/root/app-link/disk", 32, 2), Err(FsError::OwnershipClassMismatch)));
     assert!(!path.join("root/app-data/disk").exists());
+}
+
+#[test]
+fn cross_backend_links_read_write_names_and_cwd_preserve_target_domains() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let user = admin();
+    root.mount_memory_as(&user, "/mnt/cross", vfs::Limits { bytes: 65536, inodes: 64 }).unwrap();
+    root.create_directory_as(&user, "/root/host", Default::default()).unwrap();
+    root.create_directory_as(&user, "/mnt/cross/dir", Default::default()).unwrap();
+    root.create_owned_file(&user, "/root/host/data", b"host", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.create_owned_file(&user, "/mnt/cross/dir/data", b"volume", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.symlink_as(&user, "/mnt/cross/dir", "/root/to-volume").unwrap();
+    root.symlink_global_as(&user, "/root/host", "/mnt/cross/to-host").unwrap();
+    assert_eq!(root.read_file_as(&user, "/root/to-volume/data", 32).unwrap(), b"volume");
+    assert_eq!(root.read_file_as(&user, "/mnt/cross/to-host/data", 32).unwrap(), b"host");
+    root.replace_owned_file(&user, "/mnt/cross/to-host/data", b"changed").unwrap();
+    root.hardlink_as(&user, "/root/to-volume/data", "/root/to-volume/alias").unwrap();
+    root.rename_as(&user, "/root/to-volume/alias", "/root/to-volume/moved").unwrap();
+    assert_eq!(root.read_file_as(&user, "/mnt/cross/dir/moved", 32).unwrap(), b"volume");
+    let cwd = root.working_directory_as(&user, "/mnt/cross/to-host").unwrap();
+    assert_eq!(cwd.path(), "/root/host");
+    assert!(matches!(root.rename_as(&user, "/root/host", "/root/moved-host"), Err(FsError::Vfs(vfs::Error::Busy))));
+    assert!(matches!(root.hardlink_as(&user, "/root/host/data", "/root/to-volume/cross"), Err(FsError::Vfs(vfs::Error::CrossDevice))));
+    assert!(matches!(root.rename_as(&user, "/root/host/data", "/root/to-volume/cross"), Err(FsError::Vfs(vfs::Error::CrossDevice))));
+    root.remove_file_as(&user, "/root/to-volume").unwrap();
+    assert_eq!(root.read_file_as(&user, "/mnt/cross/dir/data", 32).unwrap(), b"volume");
+    assert_eq!(root.read_file_as(&user, "/root/host/data", 32).unwrap(), b"changed");
+}
+
+#[test]
+fn cross_backend_links_share_loop_budget_and_deny_host_permission_escape() {
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    root.mount_memory_as(&user, "/mnt/cross", vfs::Limits { bytes: 65536, inodes: 64 }).unwrap();
+    root.symlink_as(&user, "/mnt/cross/back", "/root/loop").unwrap();
+    root.symlink_global_as(&user, "/root/loop", "/mnt/cross/back").unwrap();
+    assert!(matches!(root.read_file_as(&user, "/root/loop", 32), Err(FsError::Vfs(vfs::Error::LinkLoop))));
+    root.create_owned_file(&user, "/root/secret", b"secret", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.symlink_global_as(&user, "/root/secret", "/mnt/cross/secret").unwrap();
+    let guest = Account { identity: Default::default(), uid: 1000, name: "guest".into(), home: "/home/guest".into() };
+    assert!(root.read_file_as(&guest, "/mnt/cross/secret", 32).is_err());
+    assert_eq!(root.readlink_as(&user, "/mnt/cross/back").unwrap(), "/root/loop");
+}
+
+#[test]
+fn cross_backend_links_exact_40_budget_nofollow_and_dangling_birth() {
+    use std::format;
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    root.mount_memory_as(&user, "/mnt/cross", vfs::Limits { bytes: 65536, inodes: 64 }).unwrap();
+    root.create_owned_file(&user, "/root/data", b"limit", VirtualMode::new(0o600).unwrap()).unwrap();
+    for n in (0..20).rev() {
+        let target = if n == 19 { "/root/data".to_owned() } else { format!("/root/h{}", n + 1) };
+        root.symlink_global_as(&user, &target, &format!("/mnt/cross/v{n}")).unwrap();
+        root.symlink_as(&user, &format!("/mnt/cross/v{n}"), &format!("/root/h{n}")).unwrap();
+    }
+    assert_eq!(root.read_file_as(&user, "/root/h0", 32).unwrap(), b"limit");
+    root.symlink_as(&user, "/root/h0", "/root/over").unwrap();
+    assert!(matches!(root.read_file_as(&user, "/root/over", 32), Err(FsError::Vfs(vfs::Error::LinkLoop))));
+    assert_eq!(root.readlink_as(&user, "/root/over").unwrap(), "/root/h0");
+    root.symlink_global_as(&user, "/root/new", "/mnt/cross/dangling").unwrap();
+    let exclusive = FileMode::new(FileAccess::WriteOnly, FileCreation::Exclusive, FileBehavior::Preserve).unwrap();
+    assert!(matches!(root.open_file_as(&user, "/mnt/cross/dangling", exclusive), Err(FsError::Vfs(vfs::Error::Exists))));
+    let mode = FileMode::new(FileAccess::ReadWrite, FileCreation::IfMissing, FileBehavior::Preserve).unwrap();
+    let fd = root.open_file_as(&user, "/mnt/cross/dangling", mode).unwrap();
+    fd.write(b"born").unwrap();
+    assert_eq!(root.read_file_as(&user, "/root/new", 32).unwrap(), b"born");
+    root.remove_file_as(&user, "/mnt/cross/dangling").unwrap();
+    assert_eq!(fd.read_at(0, 32).unwrap(), b"born");
 }
