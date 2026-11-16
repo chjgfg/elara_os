@@ -249,7 +249,7 @@ fn host_locks_pending_and_retiring_recovery_is_exact_and_ids_never_reuse() {
         drop(guard);
         drop(token);
         let bytes = fs::read(&catalog).unwrap();
-        let prefix = b"ELARA_OPEN_CATALOG_V3\n";
+        let prefix = b"ELARA_OPEN_CATALOG_V4\n";
         let mut data: serde_json::Value =
             serde_json::from_slice(bytes.strip_prefix(prefix).unwrap()).unwrap();
         data["rows"][id.to_string()]["phase"] = phase.into();
@@ -281,6 +281,7 @@ fn host_locks_capacity_rejects_create_and_truncate_before_side_effects() {
     let user = admin();
     root.create_owned_file(&user, "/root/a", b"data", VirtualMode::new(0o600).unwrap())
         .unwrap();
+    root.create_directory_as(&user, "/root/cwd-full", CreationOptions::default()).unwrap();
     let mut opens = Vec::new();
     for _ in 0..256 {
         opens.push(root.open_file_as(&user, "/root/a", FileMode::READ).unwrap());
@@ -293,6 +294,9 @@ fn host_locks_capacity_rejects_create_and_truncate_before_side_effects() {
         root.open_file_as(&user, "/root/new", FileMode::CREATE),
         Err(FsError::OwnershipCapacity)
     ));
+    let before = fs::read(path.join("var/.elara-objects/open.catalog")).unwrap();
+    assert!(matches!(root.working_directory_as(&user, "/root/cwd-full"), Err(FsError::OwnershipCapacity)));
+    assert_eq!(fs::read(path.join("var/.elara-objects/open.catalog")).unwrap(), before);
     let truncate = FileMode::new(
         FileAccess::ReadWrite,
         FileCreation::Existing,
@@ -312,6 +316,9 @@ fn host_locks_capacity_rejects_create_and_truncate_before_side_effects() {
         Err(FsError::OwnershipCapacity)
     ));
     drop(duplicate);
+    let pin = root.working_directory_as(&user, "/root/cwd-full").unwrap();
+    assert!(matches!(root.open_file_as(&user, "/root/new", FileMode::CREATE), Err(FsError::OwnershipCapacity)));
+    drop(pin);
     root.open_file_as(&user, "/root/new", FileMode::CREATE)
         .unwrap();
     drop(opens);
@@ -408,7 +415,7 @@ fn host_locks_legacy_active_catalog_is_not_adopted_and_empty_catalog_preserves_n
         .exists());
     assert!(fs::read(&catalog)
         .unwrap()
-        .starts_with(b"ELARA_OPEN_CATALOG_V3\n"));
+        .starts_with(b"ELARA_OPEN_CATALOG_V4\n"));
     assert_eq!(file.read(3).unwrap(), b"old");
 }
 
@@ -538,7 +545,7 @@ fn host_locks_retiring_interrupted_unlinks_finish_without_adopting_unknown_bytes
         let lease = base.join(std::format!("open-{id}.lease"));
         let catalog = base.join("open.catalog");
         let bytes = fs::read(&catalog).unwrap();
-        let prefix = b"ELARA_OPEN_CATALOG_V3\n";
+        let prefix = b"ELARA_OPEN_CATALOG_V4\n";
         let mut data: serde_json::Value =
             serde_json::from_slice(bytes.strip_prefix(prefix).unwrap()).unwrap();
         data["rows"][id.to_string()]["phase"] = "Retiring".into();
@@ -589,7 +596,7 @@ fn host_locks_directory_publish_denial_leaves_pending_and_recovers_without_touch
         assert_eq!(fs::read(path.join("root/a")).unwrap(), b"untouched");
         let catalog_path = path.join("var/.elara-objects/open.catalog");
         let bytes = fs::read(&catalog_path).unwrap();
-        let prefix = b"ELARA_OPEN_CATALOG_V3\n";
+        let prefix = b"ELARA_OPEN_CATALOG_V4\n";
         let data: serde_json::Value =
             serde_json::from_slice(bytes.strip_prefix(prefix).unwrap()).unwrap();
         assert_eq!(data["rows"]["1"]["phase"], "Pending");
@@ -611,4 +618,42 @@ fn host_locks_directory_publish_denial_leaves_pending_and_recovers_without_touch
         drop(file);
         assert!(!path.join("var/.elara-objects/open-2.lease").exists());
     }
+}
+
+#[test]
+fn host_cwd_v3_live_file_lease_migrates_without_id_domain_collision() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let user = admin();
+    root.create_owned_file(&user, "/root/cwd-v3-file", b"data", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.create_directory_as(&user, "/root/cwd-v3-dir", CreationOptions::default()).unwrap();
+    let OwnershipState::Managed(info) = root.owned_file_info("/root/cwd-v3-file").unwrap() else { panic!("managed"); };
+    assert_eq!(root.directory_info_as(&user, "/root/cwd-v3-dir").unwrap().unwrap().id, info.id.value());
+    let guard = root.namespace_guard().unwrap();
+    let (id, token) = root.register_host_open_locked(&info, ShareMode::Exclusive, false, &guard).unwrap();
+    drop(guard);
+    let catalog = path.join("var/.elara-objects/open.catalog");
+    let bytes = fs::read(&catalog).unwrap();
+    let offset = bytes.iter().position(|v| *v == 10).unwrap() + 1;
+    let mut data: serde_json::Value = serde_json::from_slice(&bytes[offset..]).unwrap();
+    data["rows"][id.to_string()].as_object_mut().unwrap().remove("domain");
+    let mut v3 = b"ELARA_OPEN_CATALOG_V3".to_vec(); v3.push(10);
+    v3.extend(serde_json::to_vec(&data).unwrap());
+    fs::write(&catalog, &v3).unwrap();
+    assert!(matches!(root.read_file_as(&user, "/root/cwd-v3-file", 16), Err(FsError::Vfs(vfs::Error::Busy))));
+    let pin = root.working_directory_as(&user, "/root/cwd-v3-dir").unwrap();
+    let bytes = fs::read(&catalog).unwrap();
+    assert!(bytes.starts_with(b"ELARA_OPEN_CATALOG_V4"));
+    let offset = bytes.iter().position(|v| *v == 10).unwrap() + 1;
+    let data: serde_json::Value = serde_json::from_slice(&bytes[offset..]).unwrap();
+    let rows = data["rows"].as_object().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[&id.to_string()]["domain"], "File");
+    assert!(rows.values().any(|r| r["domain"] == "Directory"));
+    assert!(matches!(root.remove_directory_as(&user, "/root/cwd-v3-dir"), Err(FsError::Vfs(vfs::Error::Busy))));
+    drop(pin);
+    root.remove_directory_as(&user, "/root/cwd-v3-dir").unwrap();
+    assert!(matches!(root.read_file_as(&user, "/root/cwd-v3-file", 16), Err(FsError::Vfs(vfs::Error::Busy))));
+    drop(token);
+    assert_eq!(root.read_file_as(&user, "/root/cwd-v3-file", 16).unwrap(), b"data");
 }

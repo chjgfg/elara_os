@@ -296,7 +296,7 @@ impl Intent {
         Ok(())
     }
 }
-fn directory_owner(id: u64) -> PathBuf {
+pub(super) fn directory_owner(id: u64) -> PathBuf {
     store_path().join(format!("directory-{id}.owner"))
 }
 fn stage(id: u64) -> PathBuf {
@@ -995,6 +995,14 @@ impl DataRoot {
         guard: &NamespaceGuard<'_>,
     ) -> Result<CommitReceipt, FsError> {
         let bytes = self.access_intent_bytes(&intent)?;
+        // Check candidate names, not just the explicitly named source: moving
+        // an ancestor and replacing a destination must both respect cwd leases.
+        // Policy-only edits leave identity/name unchanged and remain allowed.
+        let changed_directories = intent.old.directories.values()
+            .filter(|info| intent.new.directories.get(&info.path).is_none_or(|next| next.id != info.id))
+            .map(|info| info.id)
+            .collect();
+        self.check_host_cwd_unpinned_locked(&changed_directories, guard)?;
         self.ensure_owner_store(guard)?;
         self.publish_protocol_locked(&store_path().join("access.pending"), &bytes, true, guard)?;
         #[cfg(test)]

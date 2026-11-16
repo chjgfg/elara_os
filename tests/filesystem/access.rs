@@ -662,3 +662,109 @@ fn runtime_state_preserves_legacy_owner_directory_catalog_without_adopting_it() 
     );
     assert!(loaded.tasks.is_empty());
 }
+
+#[test]
+fn host_cwd_search_only_clone_and_independent_root_block_retarget() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let owner = user(1000);
+    let guest = user(1001);
+    root.create_directory_as(&owner, "/tmp/cwd-parent", opts(0)).unwrap();
+    root.create_directory_as(&owner, "/tmp/cwd-parent/leaf", opts(0)).unwrap();
+    root.set_access_as(&owner, "/tmp/cwd-parent/leaf", Some(mode(0o111)), None, None).unwrap();
+    assert!(matches!(root.list_as(&guest, "/tmp/cwd-parent/leaf"), Err(FsError::OwnershipDenied)));
+    let pin = root.working_directory_as(&guest, "/tmp/cwd-parent/leaf").unwrap();
+    let copy = pin.clone();
+    drop(pin);
+    let independent = DataRoot::open(&path).unwrap();
+    assert!(matches!(independent.remove_directory_as(&owner, "/tmp/cwd-parent/leaf"), Err(FsError::Vfs(crate::filesystem::vfs::Error::Busy))));
+    assert!(matches!(independent.rename_directory_as(&owner, "/tmp/cwd-parent", "/tmp/cwd-moved"), Err(FsError::Vfs(crate::filesystem::vfs::Error::Busy))));
+    drop(copy);
+    independent.remove_directory_as(&owner, "/tmp/cwd-parent/leaf").unwrap();
+    independent.create_directory_as(&owner, "/tmp/cwd-parent/leaf", opts(0)).unwrap();
+    independent.remove_directory_as(&owner, "/tmp/cwd-parent/leaf").unwrap();
+    independent.remove_directory_as(&owner, "/tmp/cwd-parent").unwrap();
+}
+
+#[test]
+fn host_cwd_replacement_aliases_permissions_and_unknown_directories() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let owner = user(1000);
+    let guest = user(1001);
+    root.create_directory_as(&owner, "/tmp/cwd-target", opts(0)).unwrap();
+    root.create_directory_as(&owner, "/tmp/cwd-source", opts(0)).unwrap();
+    root.symlink_as(&owner, "cwd-target", "/tmp/cwd-alias").unwrap();
+    let pin = root.working_directory_as(&guest, "/tmp/cwd-alias").unwrap();
+    assert_eq!(pin.path(), "/tmp/cwd-target");
+    root.remove_file_as(&owner, "/tmp/cwd-alias").unwrap();
+    assert!(matches!(root.rename_replace_host_as(&owner, "/tmp/cwd-source", "/tmp/cwd-target"), Err(FsError::Vfs(crate::filesystem::vfs::Error::Busy))));
+    assert!(!path.join("var/.elara-objects/access.pending").exists());
+    root.set_access_as(&owner, "/tmp/cwd-target", Some(mode(0o700)), None, None).unwrap();
+    assert!(matches!(pin.validate_as(&root, &guest), Err(FsError::OwnershipDenied)));
+    root.set_access_as(&owner, "/tmp/cwd-target", Some(mode(0o711)), None, None).unwrap();
+    pin.validate_as(&root, &guest).unwrap();
+    // An ordinary file lease cannot be mistaken for the directory's ID domain.
+    root.create_owned_file(&owner, "/tmp/cwd-file", b"payload", mode(0o600)).unwrap();
+    let file = root.open_file_as(&owner, "/tmp/cwd-file", FileMode::READ).unwrap();
+    assert_eq!(file.read_at(0, 7).unwrap(), b"payload");
+    drop(pin);
+    root.remove_directory_as(&owner, "/tmp/cwd-target").unwrap();
+    root.remove_directory_as(&owner, "/tmp/cwd-source").unwrap();
+    fs::create_dir(path.join("tmp/cwd-unknown")).unwrap();
+    assert!(matches!(root.working_directory_as(&owner, "/tmp/cwd-unknown"), Err(FsError::LegacyOwnershipUnknown)));
+    root.working_directory_as(&guest, "/tmp").unwrap();
+}
+
+#[test]
+fn host_cwd_same_bytes_marker_replacement_is_not_identity() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let owner = user(1000);
+    root.create_directory_as(&owner, "/tmp/cwd-marked", opts(0)).unwrap();
+    let pin = root.working_directory_as(&owner, "/tmp/cwd-marked").unwrap();
+    let marker = path.join("tmp/cwd-marked/.elara-dir-owner");
+    let bytes = fs::read(&marker).unwrap();
+    fs::remove_file(&marker).unwrap();
+    fs::write(&marker, &bytes).unwrap();
+    assert!(matches!(pin.validate_as(&root, &owner), Err(FsError::OwnershipBindingUnconfirmed)));
+}
+
+#[test]
+fn host_cwd_incomplete_lease_birth_recovers_before_reacquisition() {
+    use crate::filesystem::host_locks::HostOpenFault;
+    for fault in [HostOpenFault::BeforeContainerPublish, HostOpenFault::AfterContainerCreate,
+        HostOpenFault::AfterOwner, HostOpenFault::AfterPayload, HostOpenFault::AfterWitness] {
+        let path = fixture();
+        let mut root = DataRoot::open(&path).unwrap();
+        let owner = user(1000);
+        root.create_directory_as(&owner, "/tmp/cwd-fault", opts(0)).unwrap();
+        root.host_open_fault = fault;
+        assert!(root.working_directory_as(&owner, "/tmp/cwd-fault").is_err());
+        root.host_open_fault = HostOpenFault::None;
+        let pin = root.working_directory_as(&owner, "/tmp/cwd-fault").unwrap();
+        assert!(matches!(root.remove_directory_as(&owner, "/tmp/cwd-fault"), Err(FsError::Vfs(crate::filesystem::vfs::Error::Busy))));
+        drop(pin);
+        root.remove_directory_as(&owner, "/tmp/cwd-fault").unwrap();
+    }
+}
+
+#[test]
+fn host_cwd_task_exit_defers_pinned_directory_then_recovers_after_release() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let owner = user(1000);
+    let task = root.begin_task_as(&owner).unwrap();
+    root.create_directory_as(&owner, "/tmp/cwd-task", CreationOptions { umask: Umask::default(), scope: Some(&task) }).unwrap();
+    let pin = root.working_directory_as(&owner, "/tmp/cwd-task").unwrap();
+    let report = task.finish().unwrap();
+    assert_eq!(report.directories, 0);
+    assert_eq!(report.deferred, 1);
+    assert!(path.join("tmp/cwd-task").is_dir());
+    pin.validate_as(&root, &owner).unwrap();
+    drop(pin);
+    let report = root.recover_tasks().unwrap();
+    assert_eq!(report.directories, 1);
+    assert_eq!(report.deferred, 0);
+    assert!(!path.join("tmp/cwd-task").exists());
+}

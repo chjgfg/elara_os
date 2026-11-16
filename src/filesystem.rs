@@ -13,6 +13,7 @@ mod host_boundary;
 mod host_locks;
 mod host_symlinks;
 mod host_directory;
+mod host_cwd;
 mod log_store;
 mod metadata;
 mod modes;

@@ -457,3 +457,25 @@ fn proc_tasks_read_only_script_does_not_create_a_resource_lease() {
     assert!(report.stderr.is_empty(), "{report:?}");
     assert!(root.list_as(&user, "/proc/tasks").unwrap().is_empty());
 }
+
+#[test]
+fn host_cwd_context_clone_and_failed_cd_keep_identity_until_last_release() {
+    let (root, user) = fixture();
+    let mut context = Context::new(VirtualPath::root());
+    let report = run(&root, &user, &mut context,
+        &["-c".into(), "mkdir /root/cwd-parent; mkdir /root/cwd-parent/leaf; cd /root/cwd-parent/leaf".into()]).unwrap();
+    assert_eq!(report.status, 0, "{report:?}");
+    let mut copy = context.clone();
+    let report = run(&root, &user, &mut context,
+        &["-c".into(), "cd /missing; rmdir /root/cwd-parent/leaf".into()]).unwrap();
+    assert_eq!(context.cwd.to_string(), "/root/cwd-parent/leaf");
+    assert!(String::from_utf8_lossy(&report.stderr).contains("Busy"), "{report:?}");
+    let report = run(&root, &user, &mut context,
+        &["-c".into(), "cd /; rmdir /root/cwd-parent/leaf".into()]).unwrap();
+    assert_eq!(report.status, 1, "{report:?}");
+    assert!(String::from_utf8_lossy(&report.stderr).contains("Busy"), "{report:?}");
+    let report = run(&root, &user, &mut copy,
+        &["-c".into(), "cd /; rmdir /root/cwd-parent/leaf; mkdir /root/cwd-parent/leaf; rmdir /root/cwd-parent/leaf; rmdir /root/cwd-parent".into()]).unwrap();
+    assert_eq!(report.status, 0, "{report:?}");
+    assert!(report.stderr.is_empty(), "{report:?}");
+}

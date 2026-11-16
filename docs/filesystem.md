@@ -652,7 +652,7 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 - 工作目录用 search-only 租约，不要求目录 read；clone 共享租约，最后释放后才解除 Busy。内部目录使用物理规范路径，删除原 symlink 不改变 cwd。与 POSIX 可重命名 cwd 不同，本实现明确拒绝重命名/删除仍作为 cwd 的目录及祖先。
 - 内部挂载可位于 /mnt/NAME 下的新名称；嵌套父目录必须已存在且不经过 symlink。注册时持有父目录租约；子卷存在时父卷不能卸载。解析检查每一级父卷 search 权限，不能绕过私有父目录进入公开子卷。
 - 账号目录游标合并底层目录项与直属挂载项，有总条目上限；快照持有其列出的子卷。refresh 成功才更换快照；被删除的旧目录不会附着到同名新目录的挂载项。ls/find/du/glob 共用此目录门。
-- Host cwd 仍保留已有路径语义，不将其称为宿主 inode 锚定。卷内 symlink 仍不跨挂载，父卷 snapshot/save 不包含另行挂载的子卷。
+- 此节历史快照的Host cwd仍为路径语义；当前改动见[Host cwd生命周期](#host-cwd-2026-11-16)，尚未完成新全量验收。卷内 symlink 仍不跨挂载，父卷 snapshot/save 不包含另行挂载的子卷。
 - 新测试覆盖：无租约可改名/删除的负对照、克隆最后释放、search-only 目录、symlink cwd、嵌套父权限拒绝/放行、目录快照 Busy、find/glob/CLI 与根外哨兵。
 
 命名空间专项命令：`cargo test --offline --lib --test script_language --test execution_cli --target-dir target/fs-build vfs -- --test-threads=1 --nocapture`。实际 23 核心 + 2 真实进程 + 8 脚本，共 33 passed / 0 failed；编译 39.80s，测试分别 1.22s、16.72s、21.07s。编译出现一次既有 Windows incremental finalize AccessDenied 警告，不是测试失败；没有清缓存或修改宿主权限。随后统一四种挂载入口的命名锁内最终检查/发布，已启动严格 Clippy → 完整回归 → 默认构建及源码指纹复核。
@@ -872,7 +872,7 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 
 
 <a id="proc-foreground-2026-11-15"></a>
-## legacy任务与一般前台执行观察（专项通过，全量运行中）
+## legacy任务与一般前台执行观察（专项通过，全量测试通过但冻结失败）
 
 入口：[legacy任务表](../src/tasks.rs)、[前台观察源](../src/filesystem/runtime_executions.rs)、[解释器入口](../src/script/runtime.rs)、[真实进程守卫](../tests/execution_cli.rs)。
 
@@ -881,4 +881,18 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 - `/proc/executions/ID/status`是当前活跃前台解释器调用。普通交互Program与独立脚本共用execute_entry；同步sh/source/exec沿用当前调用，scoped后台不重复注册。显示execution_id、owner_uid（session_uid）、Running、foreground-execution；不泄露命令/参数/环境，不查询宿主PID。认证/UI会话控制不是解释器调用，不伪造对应执行记录。
 - 前台观察有独立32项容量，后台256条作业满额不占此池。登记失败在执行副作用之前返回status2/steps0；正常完成、错误和Rust展开均释放强引用。这里不留退出历史；旧status FD仍是打开时快照。下一次读刷新移除死行，目录权限0500/status0400，owner/root可读。
 - 三类proc动态目录用stride8的互斥inode对，避免新执行ID与资源租约/作业ID碰撞。克隆文件域共享观察，独立DataRoot/重启不共享进程内执行状态；只在内部卷发布，不生成宿主proc文件。
-- legacy专项b6exoev2b：严格Clippy15.37s；9任务核心、3观察核心、1真实双进程、2脚本及整个16项job_tests通过（去重29项）。前台缺失对照bz66mg4ku因NotFound失败；首轮b3sgl4x3c严格Clippy16.44s及1脚本1.45s通过。扩展bzld09lwe严格Clippy7.35s；前台2核心、1真实双进程、2脚本通过，全部provider13项与全部job_tests18项通过，去重32项。默认程序独立实跑及全目标冻结验收brxnlaiyq运行中，未宣称最新全量通过。
+- legacy专项b6exoev2b：严格Clippy15.37s；9任务核心、3观察核心、1真实双进程、2脚本及整个16项job_tests通过（去重29项）。前台缺失对照bz66mg4ku因NotFound失败；首轮b3sgl4x3c严格Clippy16.44s及1脚本1.45s通过。扩展bzld09lwe严格Clippy7.35s；前台2核心、1真实双进程、2脚本通过，全部provider13项与全部job_tests18项通过，去重32项。默认程序独立实跑成功（DEFAULT_RUNTIME_OBSERVATIONS_OK）；brxnlaiyq全目标611 passed / 0 failed / 0 ignored（388核心、187脚本、36其他），但末尾前后源码原始字节指纹不一致，最终exit1，冻结验收失败。期间切分支重写文件，不能据此升级完整冻结基线；复验bpddn18zb为继续开发主动停止，本次Host cwd增量后重新冻结。
+
+<a id="host-cwd-2026-11-16"></a>
+## Host当前目录生命周期（620项全目标冻结回归及默认实跑通过）
+
+入口：[Host锚点](../src/filesystem/host_cwd.rs)、[租约协议](../src/filesystem/host_locks.rs)、[事务命名门](../src/filesystem/access.rs)、[核心守卫](../tests/filesystem/access.rs)、[脚本守卫](../tests/script/vfs.rs)、[真实双进程](../tests/execution_cli.rs)。
+
+- 受管目录按search-only授权，固定目录ID、已开marker和跨进程租约；clone共享同一租约，最后引用释放后才可删除或重命名。与内部卷一致，活跃cwd阻止自身/祖先改名、删除与覆盖，不承诺目录移动后仍按旧文本路径继续访问。
+- 在命名空间锁内比较候选事务的名称→ID，统一覆盖一般目录操作、TaskExit及资源回收。Busy在发布access.pending之前返回，不留下等待当前进程自行释放的pending死锁。
+- open.catalog V4区分File/Directory ID域，复用原双见证和Pending→Held→Retiring恢复；旧V3文件记录仍可读，旧实现不识别V4应拒绝，不能无条件降级。原文件payload锁不作cwd长期锁。目录和文件共用256项登记上限，满额明确失败。
+- Protected分支只用于既有不可删除/改名的布局目录；未知普通Host目录明确LegacyOwnershipUnknown，不接管、不伪造身份。该分支没有额外cwd租约持久写入；受管分支承担原租约登记/退休IO成本。
+- 解释器每次进入pipeline时复验同路径锚的身份与search权限，防止旧快路径把权限撤销或不同marker当作原目录。此保护依赖协作协议，不抵抗宿主管理员整体篡改私有catalog/移植marker，不是宿主OS沙箱。
+- 负对照bxvz4qf6r：1项失败，独立DataRoot删除被钉住目录没有返回Busy。扩展专项bhdw4870r已通过：Clippy19.15s，4核心24.26s、1真实双进程9.88s、1脚本5.41s、12项旧Host锁267.46s，共18项。随后补V3活跃租约升级、TaskExit延期回收及共享满额守卫，并将后代检查收敛为一次相关集合扫描；收口专项bzxqr3r9c通过：Clippy7.41s，6核心27.88s、1真实双进程10.46s、1脚本6.42s、1共享容量470.64s，共9项，0 failed/0 ignored。全量bqnmhrxmt：默认build40.38s及默认两进程占用/释放/重启实跑通过；618 passed / 1 failed，唯一失败为tilde语法测试以宿主API创建未知目录而被新cwd门拒绝。修改前指纹与启动一致；修订夹具为受管创建，原stdout断言保留并增强status/stderr，新增未知目录拒绝且不接管守卫。复验b5laf7dv6已通过，见下方独立验收记录；保留本次失败和夹具修订依据。
+
+- 最终冻结复验b5laf7dv6：严格Clippy1.48s；全部glob专项8项11.29s；all-targets共620 passed / 0 failed / 0 ignored（394核心938.66s、189脚本374.18s、37其他）。前后166个src/tests/Cargo文件指纹均为e516688bb017b442b89b09ec893a6744a6c486f2a9abc37ecb1b9b5aba425fd4，FAILURES []、HOST_CWD_FINAL_ALL_TARGETS_VALIDATED、exit0。默认程序双进程已在bqnmhrxmt验证相同生产代码，输出DEFAULT_HOST_CWD_VALIDATED；后续仅修订测试。此620项为当前完整冻结基线，不代表跨后端链接、live overlay、网络FS或其余九层缺项已完成。Windows目录同步PermissionDenied与Linux/真实断电验证缺口仍保留。

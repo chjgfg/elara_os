@@ -88,12 +88,10 @@ pub struct Context {
 }
 impl Context {
     fn bind_cwd(&mut self, root: &DataRoot, user: &Account) -> Result<(), String> {
-        if self
-            .cwd_pin
-            .as_ref()
-            .is_some_and(|pin| pin.path() == self.cwd.to_string() && pin.belongs_to(root))
-        {
-            return Ok(());
+        if let Some(pin) = self.cwd_pin.as_ref().filter(|pin| {
+            pin.path() == self.cwd.to_string() && pin.belongs_to(root)
+        }) {
+            return pin.validate_as(root, user).map_err(|error| error.to_string());
         }
         let pin = root
             .working_directory_as(user, &self.cwd.to_string())

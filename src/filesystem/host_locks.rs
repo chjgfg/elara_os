@@ -6,14 +6,15 @@ use super::vfs::{Error, LockMode, ShareMode};
 use super::{DataRoot, FsError, OwnedFileInfo};
 use cap_std::fs::OpenOptions;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::format;
 use std::fs::{File, TryLockError};
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const MAGIC: &[u8] = b"ELARA_OPEN_CATALOG_V3\n";
+const MAGIC: &[u8] = b"ELARA_OPEN_CATALOG_V4\n";
+const V3_MAGIC: &[u8] = b"ELARA_OPEN_CATALOG_V3\n";
 const LEGACY_MAGIC: &[u8] = b"ELARA_OPEN_CATALOG_V1\n";
 pub(super) const CONTAINER_MAGIC: &[u8] = b"ELARA_OPEN_CONTAINER_V3\n";
 #[cfg(test)]
@@ -42,9 +43,17 @@ enum Lock {
     Shared,
     Exclusive,
 }
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum ObjectDomain {
+    #[default]
+    File,
+    Directory,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Row {
+    #[serde(default)]
+    domain: ObjectDomain,
     object: u64,
     generation: u64,
     exclusive: bool,
@@ -64,6 +73,11 @@ fn lease_path(id: u64) -> PathBuf {
     store_path().join(format!("open-{id}.lease"))
 }
 fn marker(id: u64, row: &Row) -> Vec<u8> {
+    if row.domain == ObjectDomain::Directory {
+        return format!("ELARA_CWD_LEASE_V1
+{id} {}
+", row.object).into_bytes();
+    }
     format!(
         "ELARA_OPEN_LEASE_V3\n{id} {} {}\n",
         row.object, row.generation
@@ -78,6 +92,7 @@ fn invalid() -> FsError {
 enum Scan<'a> {
     All,
     One(u64),
+    Directories(&'a BTreeSet<u64>),
     Io {
         info: &'a OwnedFileInfo,
         own: Option<u64>,
@@ -94,9 +109,11 @@ impl Scan<'_> {
         match self {
             Self::All => true,
             Self::One(own) => *own == id,
+            Self::Directories(directories) => row.domain == ObjectDomain::Directory && directories.contains(&row.object),
             Self::Io { info, own, write } => {
                 *own == Some(id)
-                    || (row.object == info.id.value()
+                    || (row.domain == ObjectDomain::File
+                        && row.object == info.id.value()
                         && row.generation == info.storage_generation
                         && (row.phase != Phase::Held
                             || (own.is_none() && row.exclusive)
@@ -108,7 +125,8 @@ impl Scan<'_> {
                 share,
                 truncate,
             } => {
-                row.object == info.id.value()
+                row.domain == ObjectDomain::File
+                    && row.object == info.id.value()
                     && row.generation == info.storage_generation
                     && (row.phase != Phase::Held
                         || row.exclusive
@@ -139,7 +157,8 @@ impl Catalog {
     fn check(&self, info: &OwnedFileInfo, own: Option<u64>, write: bool) -> Result<(), FsError> {
         if let Some(id) = own {
             let row = self.rows.get(&id).ok_or_else(invalid)?;
-            if row.object != info.id.value()
+            if row.domain != ObjectDomain::File
+                || row.object != info.id.value()
                 || row.generation != info.storage_generation
                 || row.phase != Phase::Held
             {
@@ -147,7 +166,8 @@ impl Catalog {
             }
         }
         for (id, row) in &self.rows {
-            if Some(*id) == own
+            if row.domain != ObjectDomain::File
+                || Some(*id) == own
                 || row.object != info.id.value()
                 || row.generation != info.storage_generation
             {
@@ -194,17 +214,21 @@ impl DataRoot {
         let legacy = bytes.starts_with(LEGACY_MAGIC) || bytes.starts_with(LEGACY_V2_MAGIC);
         let data = bytes
             .strip_prefix(MAGIC)
+            .or_else(|| bytes.strip_prefix(V3_MAGIC))
             .or_else(|| bytes.strip_prefix(LEGACY_MAGIC))
             .or_else(|| bytes.strip_prefix(LEGACY_V2_MAGIC))
             .ok_or_else(invalid)?;
         let catalog: Catalog = serde_json::from_slice(data).map_err(|_| invalid())?;
-        if legacy && !catalog.rows.is_empty() {
+        if (legacy && !catalog.rows.is_empty())
+            || (!bytes.starts_with(MAGIC) && catalog.rows.values().any(|r| r.domain != ObjectDomain::File))
+        {
             return Err(invalid());
         }
         if catalog.next == 0
             || catalog.rows.len() > MAX_OPENS
             || catalog.rows.iter().any(|(id, r)| {
                 *id == 0 || *id >= catalog.next || r.object == 0 || r.generation == 0
+                    || (r.domain == ObjectDomain::Directory && (r.generation != 1 || r.exclusive || r.lock != Lock::None))
             })
         {
             return Err(invalid());
@@ -436,7 +460,7 @@ impl DataRoot {
         guard: &NamespaceGuard<'_>,
     ) -> Result<(u64, File), FsError> {
         self.check_host_open_capacity_locked(guard)?;
-        let mut catalog = self.recover_host_scan_locked(
+        let catalog = self.recover_host_scan_locked(
             Scan::Open {
                 info,
                 share,
@@ -446,7 +470,8 @@ impl DataRoot {
         )?;
         // Opens without truncation grant a descriptor; locks gate its later IO.
         for row in catalog.rows.values() {
-            if row.object == info.id.value()
+            if row.domain == ObjectDomain::File
+                && row.object == info.id.value()
                 && row.generation == info.storage_generation
                 && (row.exclusive || share == ShareMode::Exclusive)
             {
@@ -456,25 +481,60 @@ impl DataRoot {
         if truncate {
             catalog.check(info, None, true)?;
         }
-        if catalog.rows.len() >= MAX_OPENS {
-            return Err(FsError::OwnershipCapacity);
-        }
-        let id = catalog.next;
-        catalog.next = id
-            .checked_add(1)
-            .ok_or(FsError::OwnershipIdentityExhausted)?;
-        match self.dir.symlink_metadata(lease_path(id)) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-            Ok(_) => return Err(invalid()),
-        }
         let row = Row {
+            domain: ObjectDomain::File,
             object: info.id.value(),
             generation: info.storage_generation,
             exclusive: share == ShareMode::Exclusive,
             lock: Lock::None,
             phase: Phase::Pending,
         };
+        self.register_lease_row(catalog, row, guard)
+    }
+    pub(super) fn register_host_cwd_locked(
+        &self,
+        directory: u64,
+        guard: &NamespaceGuard<'_>,
+    ) -> Result<(u64, File), FsError> {
+        self.check_host_open_capacity_locked(guard)?;
+        let catalog = self.recover_host_scan_locked(Scan::Directories(&BTreeSet::from([directory])), guard)?;
+        self.register_lease_row(catalog, Row {
+            domain: ObjectDomain::Directory,
+            object: directory,
+            generation: 1,
+            exclusive: false,
+            lock: Lock::None,
+            phase: Phase::Pending,
+        }, guard)
+    }
+    pub(super) fn check_host_cwd_unpinned_locked(
+        &self,
+        directories: &BTreeSet<u64>,
+        guard: &NamespaceGuard<'_>,
+    ) -> Result<(), FsError> {
+        if directories.is_empty() { return Ok(()); }
+        let catalog = self.recover_host_scan_locked(Scan::Directories(directories), guard)?;
+        if catalog.rows.values().any(|r| r.domain == ObjectDomain::Directory && directories.contains(&r.object)) {
+            return Err(Error::Busy.into());
+        }
+        Ok(())
+    }
+    fn register_lease_row(
+        &self,
+        mut catalog: Catalog,
+        row: Row,
+        guard: &NamespaceGuard<'_>,
+    ) -> Result<(u64, File), FsError> {
+        if catalog.rows.len() >= MAX_OPENS {
+            return Err(FsError::OwnershipCapacity);
+        }
+        let id = catalog.next;
+        catalog.next = id.checked_add(1).ok_or(FsError::OwnershipIdentityExhausted)?;
+        match self.dir.symlink_metadata(lease_path(id)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+            Ok(_) => return Err(invalid()),
+        }
         let bytes = marker(id, &row);
         catalog.rows.insert(id, row);
         self.save_open_catalog(&catalog, guard)?;
@@ -511,7 +571,8 @@ impl DataRoot {
         };
         let mut catalog = self.recover_host_scan_locked(scan, guard)?;
         let own = catalog.rows.get(&id).ok_or_else(invalid)?;
-        if own.object != info.id.value()
+        if own.domain != ObjectDomain::File
+            || own.object != info.id.value()
             || own.generation != info.storage_generation
             || own.phase != Phase::Held
         {

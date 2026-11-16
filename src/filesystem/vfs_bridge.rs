@@ -6,8 +6,8 @@ use super::{
 use crate::{permissions::Access, users::Account};
 use std::matches;
 use std::sync::Arc;
-/// A checked working directory. Internal directories carry a search-only lease;
-/// host directories retain the existing path-based semantics, not a fake inode.
+/// A checked, search-only working directory with a cooperative name lease.
+/// Bootstrap Host directories are protected by the immutable namespace policy.
 #[derive(Clone, Debug)]
 pub struct WorkingDirectory {
     path: String,
@@ -16,7 +16,7 @@ pub struct WorkingDirectory {
 }
 #[derive(Clone, Debug)]
 enum WorkingBacking {
-    Host,
+    Host(super::host_cwd::HostAnchor),
     Mounted(vfs::DirectoryAnchor),
 }
 impl WorkingDirectory {
@@ -26,9 +26,16 @@ impl WorkingDirectory {
     pub(crate) fn belongs_to(&self, root: &DataRoot) -> bool {
         Arc::ptr_eq(&self.family, &root.family)
     }
+    pub(crate) fn validate_as(&self, root: &DataRoot, actor: &Account) -> Result<(), FsError> {
+        if !self.belongs_to(root) { return Err(FsError::InvalidRoot); }
+        match &self.backing {
+            WorkingBacking::Host(anchor) => root.validate_host_anchor(actor, &self.path, anchor),
+            WorkingBacking::Mounted(_) => Ok(()),
+        }
+    }
     pub fn volume_id(&self) -> Option<u64> {
         match &self.backing {
-            WorkingBacking::Host => None,
+            WorkingBacking::Host(_) => None,
             WorkingBacking::Mounted(pin) => Some(pin.volume_id()),
         }
     }
@@ -44,11 +51,8 @@ impl DataRoot {
                 let guard = self.namespace_guard()?;
                 let path = self.resolve_host_locked(actor, path, Access::Read, true, &guard)?;
                 let catalog = self.load_access_catalog()?;
-                if let Some(info) = self.directory_at_locked(&path, &catalog)? {
-                    self.directory_access_locked(actor, &info, 1, &catalog)?;
-                }
-                self.validate_directory_unchecked(&path)?;
-                (path, WorkingBacking::Host)
+                let pin = self.anchor_host_directory_locked(actor, &path, &catalog, &guard)?;
+                (path, WorkingBacking::Host(pin))
             }
             Route::Mounted {
                 volume,

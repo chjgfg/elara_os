@@ -989,3 +989,109 @@ fn proc_executions_real_process_snapshot_and_restart_are_virtual_only() {
     assert_eq!(fs::read(&config).unwrap(), before);
     assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
 }
+
+#[test]
+fn host_cwd_real_process_blocks_retarget_and_recovers_after_holder_death() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct Holder(std::process::Child);
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/test-data")
+        .join(format!("host-cwd-cli-{}-{nonce}", std::process::id()));
+    assert!(!parent.exists());
+    fs::create_dir_all(&parent).unwrap();
+    let parent = parent.canonicalize().unwrap();
+    let data = parent.join("data");
+    let config = parent.join("fixture.env");
+    fs::write(&config, format!("ELARA_DATA_ROOT={}\n", data.display())).unwrap();
+    let original = fs::read(&config).unwrap();
+    fs::write(parent.join("sentinel"), b"outside").unwrap();
+    elara_os::initialization::prepare(&data).unwrap();
+    let root = DataRoot::open(&data).unwrap();
+    users::ensure_passwd(&root).unwrap();
+    let user = Account {
+        identity: Default::default(),
+        name: "root".into(),
+        uid: 0,
+        home: "/root".into(),
+    };
+    root.create_directory_as(&user, "/root/cwd-parent", Default::default()).unwrap();
+    root.create_directory_as(&user, "/root/cwd-parent/leaf", Default::default()).unwrap();
+    let mut holder = Holder(
+        Command::new(env!("CARGO_BIN_EXE_elara-host"))
+            .arg(&config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    holder.0.stdin.take().unwrap().write_all(
+        b"
+cd /root/cwd-parent/leaf
+echo HOST_CWD_READY
+sleep 60
+exit 0
+"
+    ).unwrap();
+    let stdout = holder.0.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            all.push_str(&line);
+            all.push('\n');
+            if line == "HOST_CWD_READY" {
+                let _ = tx.send(());
+            }
+        }
+        all
+    });
+    rx.recv_timeout(Duration::from_secs(30))
+        .expect("holder readiness");
+    let denied = run(&config,
+        "rmdir /root/cwd-parent/leaf
+mv /root/cwd-parent /root/cwd-moved
+exit 0");
+    assert!(denied.status.success());
+    let out = String::from_utf8(denied.stdout).unwrap();
+    assert_eq!(out.matches("Busy").count(), 2, "{out}");
+    assert!(data.join("root/cwd-parent/leaf").is_dir());
+    assert!(!data.join("root/cwd-moved").exists());
+    // Kill only the child created above, inside its unique fixture.
+    holder.0.kill().unwrap();
+    holder.0.wait().unwrap();
+    let holder_output = reader.join().unwrap();
+    assert!(!holder_output.contains("Error:"), "{holder_output}");
+    let admitted = run(&config,
+        "rmdir /root/cwd-parent/leaf
+mkdir /root/cwd-parent/leaf
+rmdir /root/cwd-parent/leaf
+rmdir /root/cwd-parent
+echo CWD_RELEASED
+exit 0");
+    assert!(admitted.status.success());
+    let out = String::from_utf8(admitted.stdout).unwrap();
+    assert!(out.contains("CWD_RELEASED"), "{out}");
+    assert!(!out.contains("Error:"), "{out}");
+    assert!(!data.join("root/cwd-parent").exists());
+    assert_eq!(fs::read(&config).unwrap(), original);
+    assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
+    assert!(!fs::read_dir(data.join("var/.elara-objects"))
+        .unwrap()
+        .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".lease")));
+}

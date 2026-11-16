@@ -4,7 +4,7 @@
 
 ## 1. 入口与模块边界
 
-- 核对日期：2026-11-15。最新完整冻结基线为[596项](filesystem.md#host-rename-2026-11-15)；打开对象身份、Host协作锁与硬链接专项、默认实跑、全目标回归均通过。下文390/408/489项为历史快照，不套用到当前增量。
+- 核对日期：2026-11-16。最新完整冻结基线为[620项](filesystem.md#host-cwd-2026-11-16)；打开对象身份、Host协作锁与硬链接专项、默认实跑、全目标回归均通过。下文390/408/489项为历史快照，不套用到当前增量。
 - [README](../README.md)、[命令账本](ubuntu-style-commands.md)、[脚本专题](shell-scripting.md)、[文件系统专题](filesystem.md)。
 - [fd.rs](../src/script/fd.rs)：参数、权限检查、会话所有者、文本令牌与结果报告。
 - [modules.rs](../src/script/modules.rs)：把 `fd` 分派给同一个会话的适配器。
@@ -215,4 +215,4 @@ fd closeall
 
 - Host虚拟链接增量[15项专项及默认程序实跑通过](filesystem.md#host-symlinks-2026-11-15)，586项完整回归通过：普通open在同一命名锁内解析并固定实际目标对象，Exclusive保留最终名称不跟随，旧FD不随链接重命名或目标replace迁移；先前573项冻结证据不覆盖本次源码。
 
-- Host覆盖rename已通过[37项相关测试和真实双进程](filesystem.md#host-rename-2026-11-15)：目标名称转指源inode，旧目标FD与其他硬链接保持原对象；同inode操作不增修订。目录仅覆盖受管空目标，子树已开文件FD保持能力。596项完整回归和默认实跑通过，未声称所有Host cwd生命周期已转为inode固定。
+- Host覆盖rename已通过[37项相关测试和真实双进程](filesystem.md#host-rename-2026-11-15)：目标名称转指源inode，旧目标FD与其他硬链接保持原对象；同inode操作不增修订。目录仅覆盖受管空目标，子树已开文件FD保持能力。当时596项完整回归和默认实跑通过；随后[Host cwd生命周期](filesystem.md#host-cwd-2026-11-16)已固定受管目录ID、marker与跨进程名称租约，620项冻结回归通过。未知普通目录拒绝绑定，Protected布局目录依赖不可变命名策略；不将此解释为宿主OS沙箱。

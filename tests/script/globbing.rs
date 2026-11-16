@@ -105,7 +105,8 @@ fn glob_has_an_explicit_path_limit_before_command_side_effects() {
 #[test]
 fn tilde_uses_home_without_field_splitting_and_cannot_change_identity() {
     let (root, user) = fixture();
-    fs::create_dir(root.root().join("home/a b")).unwrap();
+    // Tilde syntax is tested with a registered directory, not host adoption.
+    root.create_directory_as(&user, "/home/a b", Default::default()).unwrap();
     let report = run(
         &root,
         &user,
@@ -117,7 +118,26 @@ fn tilde_uses_home_without_field_splitting_and_cannot_change_identity() {
     )
     .unwrap();
     assert_eq!(report.stdout, b"/home/a b\n~/literal ~\nroot\n");
+    assert_eq!(report.status, 0, "{report:?}");
+    assert!(report.stderr.is_empty(), "{report:?}");
     let report = execute("echo ~");
     assert_eq!(report.stdout, b"/root\n");
     assert!(elara_os::script::parser::parse("touch /root/forbidden; echo ~someone").is_err());
+}
+
+#[test]
+fn host_cwd_tilde_unknown_directory_is_refused_without_adoption() {
+    let (root, user) = fixture();
+    let unknown = root.root().join("home/unknown cwd");
+    fs::create_dir(&unknown).unwrap();
+    fs::write(unknown.join("sentinel"), b"unmanaged").unwrap();
+    let mut context = Context::new(VirtualPath::root());
+    let report = run(&root, &user, &mut context,
+        &["-c".into(), "HOME='/home/unknown cwd'; cd ~".into()]).unwrap();
+    assert_eq!(report.status, 1, "{report:?}");
+    assert!(!report.stderr.is_empty(), "{report:?}");
+    assert_eq!(context.cwd.to_string(), "/");
+    assert_eq!(fs::read(unknown.join("sentinel")).unwrap(), b"unmanaged");
+    assert!(!unknown.join(".elara-dir-owner").exists());
+    assert!(root.directory_info_as(&user, "/home/unknown cwd").unwrap().is_none());
 }
