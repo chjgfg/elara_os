@@ -216,3 +216,5 @@ fd closeall
 - Host虚拟链接增量[15项专项及默认程序实跑通过](filesystem.md#host-symlinks-2026-11-15)，586项完整回归通过：普通open在同一命名锁内解析并固定实际目标对象，Exclusive保留最终名称不跟随，旧FD不随链接重命名或目标replace迁移；先前573项冻结证据不覆盖本次源码。
 
 - Host覆盖rename已通过[37项相关测试和真实双进程](filesystem.md#host-rename-2026-11-15)：目标名称转指源inode，旧目标FD与其他硬链接保持原对象；同inode操作不增修订。目录仅覆盖受管空目标，子树已开文件FD保持能力。当时596项完整回归和默认实跑通过；随后[Host cwd生命周期](filesystem.md#host-cwd-2026-11-16)已固定受管目录ID、marker与跨进程名称租约，620项冻结回归通过。未知普通目录拒绝绑定，Protected布局目录依赖不可变命名策略；不将此解释为宿主OS沙箱。
+
+- Host持久账本升级不重编号、不重新绑定已有FD/cwd；独立open.catalog、任务lease和payload仍保留各自协议。文件和目录同数字ID不互相占用生命周期。专项通过，完整冻结验收状态见[联合账本记录](filesystem.md#joint-catalog-2026-11-16)。

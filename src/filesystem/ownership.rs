@@ -3,6 +3,7 @@
 //! public name and the text catalog. Legacy files are never silently adopted.
 use super::access_model::{AccessCatalog, CreationAccess, CreationMode, MAX_ACCESS_BYTES};
 use super::backend::linked;
+use super::namespace_catalog::{read_store_format, CatalogFormat};
 use super::ownership_model::{
     key, Catalog, FileOwner, ObjectId, OwnedFileInfo, OwnedStorageClass, OwnershipState,
     VirtualMode, MAX_CATALOG_BYTES,
@@ -19,7 +20,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub(super) const OWNER_STORE: &str = crate::config::PRIVATE_OWNER_DIRECTORY;
-const STORE_MAGIC: &[u8] = b"ELARA_OWNERSHIP_STORE_V1\n";
+pub(super) const STORE_MAGIC: &[u8] = b"ELARA_OWNERSHIP_STORE_V1\n";
 pub(super) const OWNED_TX_MAGIC: &[u8] = b"ELARA_OWNED_OBJECT_TX_V1\n";
 const INTENT_MAGIC: &str = "ELARA_OWNERSHIP_INTENT_V1";
 const INTENT_MAGIC_REPLACE: &str = "ELARA_OWNERSHIP_INTENT_V3";
@@ -381,8 +382,15 @@ fn mutation(intent: &Intent) -> Result<(Option<OwnedFileInfo>, Option<OwnedFileI
     }
     Ok((before, after))
 }
+pub(super) struct OwnerStore {
+    pub dir: Dir,
+    pub format: CatalogFormat,
+}
 impl DataRoot {
     pub(super) fn existing_owner_store(&self) -> Result<Option<Dir>, FsError> {
+        Ok(self.owner_store_state()?.map(|store| store.dir))
+    }
+    pub(super) fn owner_store_state(&self) -> Result<Option<OwnerStore>, FsError> {
         match self.dir.symlink_metadata(store_path()) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -393,14 +401,8 @@ impl DataRoot {
         }
         self.inspect_relative(&store_path())?;
         let store = self.dir.open_dir(store_path())?;
-        let marker = store
-            .symlink_metadata("store.owner")
-            .map_err(|_| FsError::UnownedOwnershipStore)?;
-        if linked(&marker) || !marker.is_file() || !read_magic(&store, "store.owner", STORE_MAGIC)?
-        {
-            return Err(FsError::UnownedOwnershipStore);
-        }
-        Ok(Some(store))
+        let format = read_store_format(&store)?;
+        Ok(Some(OwnerStore { dir: store, format }))
     }
     pub(super) fn ensure_owner_store(&self, guard: &NamespaceGuard<'_>) -> Result<Dir, FsError> {
         if let Some(store) = self.existing_owner_store()? {
@@ -415,8 +417,8 @@ impl DataRoot {
         marker.write_all(STORE_MAGIC)?;
         marker.sync_all()?;
         drop(marker);
-        self.publish_protocol_locked(
-            &store_path().join("catalog"),
+        self.publish_catalog_locked(
+            super::namespace_catalog::CatalogComponent::Files,
             &Catalog::empty().encode()?,
             true,
             guard,
@@ -424,12 +426,12 @@ impl DataRoot {
         Ok(store)
     }
     pub(super) fn load_owner_catalog(&self, store: &Dir) -> Result<Catalog, FsError> {
-        let catalog = Catalog::decode(&read_bounded(
-            store,
-            Path::new("catalog"),
-            MAX_CATALOG_BYTES,
-        )?)?;
-        let access = self.load_access_catalog()?;
+        let (catalog, access) = if self.joint_store(store)? {
+            self.joint_catalogs(store)?
+        } else {
+            (Catalog::decode(&read_bounded(store, Path::new("catalog"), MAX_CATALOG_BYTES)?)?,
+             Self::read_legacy_access_catalog(store)?)
+        };
         for info in catalog.entries.values() {
             if let super::DeleteCondition::TaskExit(id) = info.delete_condition {
                 if access.tasks.get(&id) != Some(&info.owner.uid) {
@@ -692,8 +694,8 @@ impl DataRoot {
         if _fault == OwnershipFault::AfterPublicName {
             return Err(io::Error::other("injected after public name publication").into());
         }
-        let receipt = self.publish_protocol_locked(
-            &store_path().join("catalog"),
+        let receipt = self.publish_catalog_locked(
+            super::namespace_catalog::CatalogComponent::Files,
             &intent.new.encode()?,
             false,
             guard,
@@ -773,23 +775,21 @@ impl DataRoot {
     }
     pub(super) fn recover_owner_intent_locked(
         &self,
+        store: &Dir,
         guard: &NamespaceGuard<'_>,
     ) -> Result<(), FsError> {
-        let pending = store_path().join("pending");
-        match self.dir.symlink_metadata(&pending) {
+        guard.require_root(self)?;
+        match store.symlink_metadata("pending") {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
             Ok(_) => {}
         }
-        let store = self
-            .existing_owner_store()?
-            .ok_or(FsError::UnownedOwnershipStore)?;
         let intent = Intent::decode(&read_bounded(
-            &store,
+            store,
             Path::new("pending"),
             ROOTFS_DEFAULTS.max_transaction_bytes,
         )?)?;
-        self.finish_owner_intent(&store, &intent, guard, OwnershipFault::None)?;
+        self.finish_owner_intent(store, &intent, guard, OwnershipFault::None)?;
         Ok(())
     }
     fn commit_owned_change(

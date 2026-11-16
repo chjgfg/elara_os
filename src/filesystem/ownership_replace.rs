@@ -204,8 +204,8 @@ impl DataRoot {
         if _fault == OwnershipFault::AfterPublicName {
             return Err(io::Error::other("injected after replacement namespace").into());
         }
-        let receipt = self.publish_protocol_locked(
-            &store_path().join("catalog"),
+        let receipt = self.publish_catalog_locked(
+            super::super::namespace_catalog::CatalogComponent::Files,
             &intent.new.encode()?,
             false,
             guard,

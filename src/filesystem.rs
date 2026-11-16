@@ -20,6 +20,8 @@ mod modes;
 mod namespace;
 mod namespace_access;
 mod namespace_resolution;
+mod namespace_catalog;
+pub use namespace_catalog::CatalogUpgrade;
 mod objects;
 mod open;
 mod owned_access;

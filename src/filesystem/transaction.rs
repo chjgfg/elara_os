@@ -31,6 +31,62 @@ pub(super) fn read_magic(dir: &Dir, name: &str, expected: &[u8]) -> io::Result<b
     Ok(bytes == expected)
 }
 
+// Immutable contents, synchronized before their first atomic publication.
+pub(super) const REPLACE_OWNER: &str = "replace.owner";
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum MarkerPublication {
+    Seeded,
+    Shared,
+    Independent { link_error: io::ErrorKind },
+}
+pub(super) fn validate_replace_owner(store: &Dir) -> io::Result<bool> {
+    match store.symlink_metadata(REPLACE_OWNER) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(metadata) => {
+            if linked(&metadata) || !metadata.is_file()
+                || !read_magic(store, REPLACE_OWNER, TX_MAGIC)?
+            {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid shared transaction owner"));
+            }
+            Ok(true)
+        }
+    }
+}
+pub(super) fn write_transaction_owner(store: &Dir, stage: &Dir) -> io::Result<MarkerPublication> {
+    write_transaction_owner_with(store, stage, |from, source, to, target| {
+        from.hard_link(source, to, target)
+    })
+}
+// Both callers hold the namespace lock. The injected operation exercises the
+// fallback in tests without depending on the host filesystem's link support.
+pub(super) fn write_transaction_owner_with(
+    store: &Dir,
+    stage: &Dir,
+    mut link: impl FnMut(&Dir, &str, &Dir, &str) -> io::Result<()>,
+) -> io::Result<MarkerPublication> {
+    let shared = validate_replace_owner(store)?;
+    let fallback = if shared {
+        match link(store, REPLACE_OWNER, stage, TX_OWNER) {
+            Ok(()) => return Ok(MarkerPublication::Shared),
+            Err(error) => Some(error.kind()),
+        }
+    } else { None };
+    let mut owner = stage.open_with(TX_OWNER, OpenOptions::new().write(true).create_new(true))?;
+    owner.write_all(TX_MAGIC)?;
+    owner.sync_all()?;
+    drop(owner);
+    if let Some(link_error) = fallback {
+        return Ok(MarkerPublication::Independent { link_error });
+    }
+    // Never publish partial seed bytes or overwrite an unknown existing name.
+    match link(stage, TX_OWNER, store, REPLACE_OWNER) {
+        Ok(()) => Ok(MarkerPublication::Seeded),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(error),
+        Err(error) => Ok(MarkerPublication::Independent { link_error: error.kind() }),
+    }
+}
+
 pub(super) fn validate_store(data: &DataRoot) -> Result<Dir, FsError> {
     let path = store_path();
     data.inspect_relative(&path)?;
@@ -188,8 +244,7 @@ impl DataRoot {
     pub(super) fn namespace_guard(&self) -> Result<NamespaceGuard<'_>, FsError> {
         let file = lock_store(&ensure_store(self)?)?;
         let guard = NamespaceGuard::from_locked(self, file);
-        self.recover_access_intent_locked(&guard)?;
-        self.recover_owner_intent_locked(&guard)?;
+        self.recover_namespace_catalogs_locked(&guard)?;
         Ok(guard)
     }
 
@@ -263,10 +318,7 @@ impl DataRoot {
         };
         let stage = store.open_dir(&name)?;
         let prepared = (|| -> io::Result<()> {
-            let mut owner =
-                stage.open_with(TX_OWNER, OpenOptions::new().write(true).create_new(true))?;
-            owner.write_all(TX_MAGIC)?;
-            owner.sync_all()?;
+            let _marker_publication = write_transaction_owner(&store, &stage)?;
             let mut payload =
                 stage.open_with(PAYLOAD, OpenOptions::new().write(true).create_new(true))?;
             #[cfg(test)]
@@ -436,10 +488,7 @@ impl DataRoot {
         };
         let stage = store.open_dir(&name)?;
         let prepared = (|| -> io::Result<()> {
-            let mut owner =
-                stage.open_with(TX_OWNER, OpenOptions::new().write(true).create_new(true))?;
-            owner.write_all(TX_MAGIC)?;
-            owner.sync_all()?;
+            let _marker_publication = write_transaction_owner(&store, &stage)?;
             match &payload {
                 ProtocolPayload::Bytes(contents) => {
                     let mut payload = stage

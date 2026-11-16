@@ -635,3 +635,25 @@ cat /proc/executions/*/status
 ```
 
 第一类带`task_id`和`kind: legacy-task`，已完成计时显示`TaskExited(0)`，有界历史在身份切换/会话结束退休。第二类显示当前这次前台解释器调用自身，返回后不保留历史；后台作业仍由`jobs`管理，不重复算为前台。所有目录均为虚拟只读投影，不读取宿主进程。实现与验收边界见[前台观察账本](filesystem.md#proc-foreground-2026-11-15)。
+
+### Host持久账本升级
+
+```text
+mkdir /root/joint
+printf before > /root/joint/data
+vfs catalog-upgrade
+printf after > /root/joint/data
+exit 0
+```
+
+重启同一个虚拟根后执行：
+
+```text
+cat /root/joint/data
+vfs catalog-upgrade
+mkdir /root/joint/sub
+mv /root/joint/data /root/joint/sub/moved
+cat /root/joint/sub/moved
+```
+
+两次读取都为`after`。升级打印`Migrated`或`AlreadyCurrent`及目录耐久状态；`Unconfirmed(PermissionDenied)`不等于数据未发布，也不保证断电后存活。升级只允许root，重复执行不重编号；升级后旧运行时不能继续写V1账本，不要手工改marker降级。rename可能保留目录同步未确认告警。协议及实测状态见[联合账本单一权威记录](filesystem.md#joint-catalog-2026-11-16)。

@@ -909,6 +909,40 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 - `vfs inode PATH`返回InodeMetadata：身份为HostFile(ObjectId)、HostDirectory(ID)、Virtual(filesystem,inode)、ProtectedLayout或Unknown。Host数字ID仅在同一数据根协议内可比，不是OS inode、不是跨数据根全局ID；Unknown/ProtectedLayout不是对象相同的证据。
 - 元数据权限为Managed(owner,mode)、ProtectedLayout或Unknown；名称计数Known仅统计登记的公开名称，不把payload/marker私有硬链接计入。Host时间为真实Timestamp/Unavailable，内部时间为Logical mutation ticks；不伪造宿主uid、nlink或统一wall-clock。Host元数据投影复用原stat身份/未知别名门，在同一guard内完成，不接管未知对象。
 - 证据：b9zr1i6iw旧实现两项行为负对照失败；接入后b4866h4zy严格Clippy与两项跨后端测试通过，脚本1通过/1失败（系统写拒绝错误类型变更，已恢复原Denied映射，未降低断言）。bvnhnf390的Host inode负对照在Unsupported处失败。扩展专项bhugbemf1通过：严格Clippy14.72s；cross_backend核心4项22.13s（含原跨后端硬链接拒绝测试）、真实CLI重启1项9.92s、统一inode3项4.41s、跨挂载脚本2项5.46s、原Host链接8项63.32s、系统provider13项8.22s，共31项，0失败，CROSS_BACKEND_METADATA_TARGETED_OK、exit0。Windows incremental finalize os5警告仍保留。b2simxdmq已启动默认构建、默认程序两进程和all-targets前后源码指纹冻结验收，完整结果为626通过/1失败，167文件前后指纹一致；唯一失败为旧真实进程测试仍期待未挂载目标CrossDevice，新行为为NotFound，后续挂载读写正常。已修订该历史预期，保留错误数量和精确数据断言并增加无Host影子目录检查；生产代码未改，复验前不升级620项完整基线。
-- 未完成：文件/目录持久catalog统一迁移及跨数据根持久统一身份协议；本节只是统一解析与显式元数据投影，不宣称原第2项全部完成。设备写例外仍仅限既有内置dev入口，不将路径链接当作新增设备写授权。其余应用隔离、自动缓存驱逐、透明写回、空间总账、共享磁盘快照、live overlay、透明块加密/全局去重和网络FS继续在原计划内。
+- 本节验收时未完成文件/目录持久catalog迁移；后续实现与证据见[联合账本](#joint-catalog-2026-11-16)。跨数据根持久统一身份协议仍未完成，不宣称原第2项全部完成。设备写例外仍仅限既有内置dev入口，不将路径链接当作新增设备写授权。其余应用隔离、自动缓存驱逐、透明写回、空间总账、共享磁盘快照、live overlay、透明块加密/全局去重和网络FS继续在原计划内。
 
 - 最终复验bjlbvnect：Clippy1.55s、修订的真实重启守卫1项4.23s；all-targets627 passed / 0 failed / 0 ignored（400核心1079.86s、189脚本387.37s、38其他），前后167文件指纹f8649b1e812880ec47aff4177cd8b56e8867dff6727949d15de9f7bbc6e5384d一致，FAILURES []、CROSS_BACKEND_FINAL_FULL_VALIDATED、exit0。默认程序在b2simxdmq已验证相同生产代码双进程往返，DEFAULT_CROSS_BACKEND_VALIDATED；只修测试预期后全量复验通过，保留历史626/1失败。目录同步PermissionDenied和incremental os5警告未宣称解决。
+
+<a id="joint-catalog-2026-11-16"></a>
+## Host持久联合账本（专项通过，最新完整回归645通过/3失败）
+
+入口：[迁移与联合发布](../src/filesystem/namespace_catalog.rs)、[文件账本门](../src/filesystem/ownership.rs)、[权限事务](../src/filesystem/access.rs)、[核心守卫](../tests/filesystem/namespace_catalog.rs)、[真实双进程](../tests/execution_cli.rs)。
+
+- root执行`vfs catalog-upgrade`，在原跨进程命名锁内恢复旧pending后迁移。返回`CatalogUpgrade::Migrated`或`AlreadyCurrent`，都携带`DirectoryDurability::Synced/Unconfirmed`，CLI直接打印；不能把原子可见当作断电耐久。V1保持兼容读取，不自动接管未知文件；V2以`namespace.catalog`为文件/目录/ACL/资源/任务信息的单一持久权威。`store.owner`升级为`ELARA_OWNERSHIP_STORE_V2`，旧版本按原V1门拒绝继续操作；不支持手工改回marker降级。
+- 迁移日志保留旧文件、权限账本的原始字节，并明确区分权限账本缺失与存在。联合封套按有界长度前缀保存两个规范分量；文件、权限各400KiB，联合与迁移日志都受1MiB上限。新内容由旧内容确定性派生，不把同一快照重复存两遍导致有效容量减半。原revision、文件ID、目录ID和策略不重编号；身份仍带File/Directory域，不是跨数据根全局ID。
+- 发布次序为迁移日志→联合账本→V2 marker→精确退休旧文件账本→精确退休旧权限账本→移除迁移日志。已发布且字节匹配的联合账本可复用；切换前必须存在全部原有文件，切换后允许已完成的退休步骤。每次先验证所有残留旧文件，再删除任何一个；未知marker、未知账本、篡改和不匹配状态保留并拒绝，不覆盖、不吞IO错误。缺失的V2主账本不能回退重建V1。
+- 文件创建/替换、覆盖rename、目录联合事务、policy和初始化全部通过显式`CatalogComponent`发布门；通用协议发布函数不按文件名截流。旧AfterFiles/AfterCatalog检查点保留，未完成事务仍需日志恢复，不能把“单文件权威”误称为所有公共名称与策略一次物理写入。普通命名门和直接启动恢复门都先恢复迁移。
+- 升级不关闭或撤销活跃FD、cwd、任务lease。其独立open.catalog、任务锁和对象payload继续由原协议管理；不是把所有协议文件打成一个大文件。旧进程按V1 marker门拒绝新操作；升级不替宿主撤销既有OS文件句柄。
+- 证据：命令缺失负对照bxeneuuat失败；接线后b2jt0btlu编译27.94s成功，但原测试把两次cat输出拼接，受到既有rename目录同步PermissionDenied告警干扰。改为两次独立读取标记并断言最终文件原始字节，保留无Error与告警。bdrk5cp13在新测试缺少文件内容参数处编译失败，已补实参。bk972ecpj专项12核心90.04s及真实双进程1项10.75s全部通过（编译81s），包括V1～V7往返、迁移五断点、篡改拒绝、旧pending/V2事务恢复、活跃FD/cwd及同号跨域。扩展b2bod3kbp已验证：摘除直接恢复门后1项按预期失败（NotFound，1.32s），finally恢复源码原字节；严格Clippy23.66s通过，16项核心130.51s、1项真实CLI重启9.83s通过，JOINT_CATALOG_TARGETED_VALIDATED、exit0。16项核心含1个子进程入口；父测试分别在五个发布阶段骤退子进程并从独立DataRoot恢复。容量拒绝及V2缺账本无回退守卫通过。bthoxixep实测Clippy0.63s、默认build25.54s、默认程序双进程DEFAULT_JOINT_CATALOG_VALIDATED通过；all-targets在416核心、2 default_acl_cli、22 execution_cli和4 fd_cli通过后，于既有fd_cli取消+清理小于2秒断言失败，后续目标未运行。169文件前后指纹394feb920cc7a7059cdf9f1eff4675f4a89151039615960ab4778e1cfcd436e0一致。原测试隔离复验bjo6qmpit通过（7.43s），不据此抹去全量失败；只补实际elapsed诊断，2秒阈值及清理断言不变，后续并发矩阵及归因修订见下文。完整冻结基线暂仍627项。
+- 边界：这是同一虚拟根内Host协议升级，不提供跨根全局身份、不迁移内部卷镜像格式，不是完整应用隔离或宿主OS沙箱。只写测试/配置指定虚拟根，不改宿主磁盘、挂载、账号或权限。Windows目录同步PermissionDenied、Linux原生及真实断电验证缺口仍保留；进程中断恢复不等于断电耐久。
+
+- 取消清理性能修订记录：默认并发3轮稳定失败（2.164/2.610/2.139s）；上一提交同机2轮通过（1.795/1.613s），临时对照后当前源码原字节恢复。合并marker读取后仍有2轮超时（2.103/2.147/1.935s），未降低2秒阈值。现将同锁migration/access/owner恢复合并为一次目录验证，保持检查顺序与失败保留，后续复验见下文；该读取优化不能单独解释或消除全部时限失败。
+
+- 取消测试准备门修订的实证：分段计时显示等待命名锁仅约1.8ms，持久回收/退休约645/931ms；不能把所有延迟归为目录重复打开。原测试用宿主exists观察公共名字，三轮均实测此时owner pending仍存在。改为经程序自身读取确认提交，再计时TERM+wait+完整清理，保留原2秒门；三轮1.433/1.608/1.445s全部满足，证明未完成创建曾污染取消计时。该批第一轮另一个进程恢复测试初始化遇Error但旧断言未输出文本，后两轮全过；已补错误诊断并复验，不把该独立失败标为已定位。
+
+- 最新FD复验bk4og0k97：三轮均5 passed / 0 failed，取消+完整清理1.799/1.535/1.438s，原2秒门保留，准备同步前owner_pending三轮均true。独立初始化错误未再复现，保留历史记录而不宣称已根治。随后完成的bes6zemrr完整冻结结果见下一条，不用本批三轮结果替代全量结果。
+
+- 最新完整冻结bes6zemrr：Clippy9.64s、默认程序双进程DEFAULT_JOINT_CATALOG_FINAL_VALIDATED通过；all-targets --no-fail-fast共640 passed / 4 failed（416核心，186/189脚本，38/39其余）。169文件前后指纹d30d12f6835c8139473487bac444c10225054f806bb9d8c5f34e0323c892b569一致，耗时1224.86s。失败为FD取消清理2.0775208s及三个脚本作业时限守卫；准备信号修订和读取去重不足以保证完整负载下通过。保留原2秒门及默认并发。后续b8stugzd2完成上一提交完整脚本/FD目标两轮对照：FD两轮均5/5通过（1.4631957s、1.8053931s），脚本两轮均186/189，同三个时限守卫失败；原工作区按字节恢复。因此三个脚本时限失败在旧版当前环境也可复现，不能全部归为联合账本新增回归；当前FD负载下偶发超时仍未收口。未提交、未推送，不升级627项历史完整通过基线。
+
+
+### 持久发布固定标记复用（专项通过，完整回归645通过/3失败）
+
+入口：[事务发布](../src/filesystem/transaction.rs)、[恢复](../src/filesystem/recovery.rs)、[守卫](../tests/filesystem/transaction.rs)。
+
+- 分段插桩bgwckkxx0：18项作业专项15通过/3时限失败；归属标记创建、写入、同步约56–644ms/次，数据同步另有成本。插桩已原字节恢复；这不是正式吞吐基准，不宣称所有耗时都来自标记。
+- 事务私有目录增加不可变`replace.owner`。首次先在普通stage写入并`sync_all`，再用硬链接发布完整种子；后续逐次核验普通文件类型及精确字节，以硬链接建立`transaction.owner`。不跨锁缓存、不共享可变payload、不减少数据文件同步，也不改变目标原子发布协议。
+- `MarkerPublication`显式区分`Seeded`、`Shared`、`Independent { link_error }`。链接不可用时独立创建、写入和同步标记，不能把回退路径算作已节省同步。损坏/目录/链接种子拒绝使用且不覆盖；恢复只略过已验证种子，未知事务内容仍保留。
+- 专项包含真实别名验证（复制相同字节不能通过）、两种种子状态下的强制回退、损坏种子与旧payload保护、未知stage归属禁止覆盖；负对照摘除共享分支。bx0m8ercp已验证：新增4项0.76s通过；摘掉共享分支后别名守卫按预期失败（AlreadyExists，0.42s），原源码逐字节恢复；严格Clippy22.21s通过，事务10项2.50s、恢复4项0.80s通过。bmmc1nowf已完成默认程序双进程及完整冻结回归，结果见下一条；不宣称全部时限已解决。
+
+- bmmc1nowf最终证据：默认build25.09s、两次默认程序启动均exit0/stderr空，DEFAULT_JOINT_SHARED_MARKER_VALIDATED；全目标645 passed / 3 failed（420核心、186/189脚本、39/39其余），包括execution_cli22/22、fd_cli5/5通过。169个源码文件前后SHA-256均为e5038d19e11f8631d81423b876776fac27ab0d40aeabe306f01d48746499cca0。失败仍为job_tests下cancellation_prevents_later_effects_and_wait_reports_observed_cancellation、exit_cancels_and_joins_unfinished_jobs_instead_of_leaving_detached_work、cancellation_crosses_nested_sh_source_and_conditionals_without_running_traps；上版同环境两轮亦失败，保留问题，不提高阈值、不隐藏或跳过测试。627项仍是历史全绿基线。
+- 修订：上一条“FD负载下未收口”是bes6zemrr时点的判断；本批FD全过只能证明本批满足原门，不能证明所有负载下保证两秒。联合账本及固定标记协议按专项和真实程序证据独立保存，三个脚本时限、Windows目录同步、Linux原生及断电验收继续列为未完成。

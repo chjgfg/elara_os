@@ -32,8 +32,7 @@ impl DataRoot {
         guard: &NamespaceGuard<'_>,
     ) -> Result<RecoveryOutcome, FsError> {
         guard.require_root(self)?;
-        self.recover_access_intent_locked(guard)?;
-        self.recover_owner_intent_locked(guard)?;
+        self.recover_namespace_catalogs_locked(guard)?;
         self.recover_host_opens_locked(guard)?;
         let store = validate_store(self)?;
         let mut names = Vec::new();
@@ -41,6 +40,10 @@ impl DataRoot {
             let entry = result?;
             let name = entry.file_name();
             if name == STORE_MARKER || name == "store.lock" {
+                continue;
+            }
+            if name == super::transaction::REPLACE_OWNER {
+                super::transaction::validate_replace_owner(&store)?;
                 continue;
             }
             names.push(name);

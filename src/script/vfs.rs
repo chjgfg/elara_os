@@ -12,6 +12,7 @@ const HELP: &str =
 vfs pseudo proc|sys|dev PATH
 vfs unmount PATH
 vfs mounts (User or System provider)
+vfs catalog-upgrade (root-only; recoverable single Host catalog; old runtimes cannot write V2)
 vfs inode PATH (typed Host/volume identity, registered names, Host timestamps or logical ticks)
 vfs link SOURCE DEST (same volume, or managed Host regular files in one resource domain)
 vfs symlink TARGET DEST (internal: volume-relative; Host: link-parent-relative or virtual-root-absolute; max 40)
@@ -59,6 +60,10 @@ pub(super) fn execute(
     };
     let mut stdout = Vec::new();
     match args {
+        [verb] if verb == "catalog-upgrade" => {
+            let result = root.upgrade_catalog_as(user).map_err(|e| e.to_string())?;
+            writeln!(stdout, "{result:?}").map_err(|e| e.to_string())?;
+        }
         [verb, target, destination] if verb == "symlink-global" => {
             root.symlink_global_as(user, target, &resolve(destination)?)
                 .map_err(|e| e.to_string())?;

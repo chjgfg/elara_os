@@ -1138,3 +1138,38 @@ fn cross_backend_real_process_links_metadata_and_image_restart() {
     assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
     assert!(fs::symlink_metadata(data.join("root/to-volume")).unwrap().is_file());
 }
+
+#[test]
+fn joint_catalog_real_process_upgrade_and_restart_use_single_authority() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-data")
+        .join(format!("joint-catalog-{}-{nonce}", std::process::id()));
+    assert!(!parent.exists());
+    fs::create_dir_all(&parent).unwrap();
+    let parent = parent.canonicalize().unwrap();
+    let data = parent.join("data");
+    let config = parent.join("fixture.env");
+    fs::write(&config, format!("ELARA_DATA_ROOT={}\n", data.display())).unwrap();
+    let before = fs::read(&config).unwrap();
+    fs::write(parent.join("sentinel"), b"outside").unwrap();
+    let first = run(&config, "mkdir /root/joint\nprintf before > /root/joint/data\nvfs catalog-upgrade\nprintf after > /root/joint/data\necho UPGRADED\nexit 0");
+    let output = String::from_utf8_lossy(&first.stdout);
+    assert!(first.status.success() && first.stderr.is_empty(), "{first:?}");
+    assert!(!output.contains("Error:"), "{output}");
+    let store = data.join("var/.elara-objects");
+    assert_eq!(fs::read(store.join("store.owner")).unwrap(), b"ELARA_OWNERSHIP_STORE_V2\n");
+    assert!(store.join("namespace.catalog").is_file());
+    assert!(!store.join("catalog").exists());
+    assert!(!store.join("access.catalog").exists());
+    let second = run(&config, "cat /root/joint/data\necho READ_BEFORE_MOVE\nvfs catalog-upgrade\nmkdir /root/joint/sub\nmv /root/joint/data /root/joint/sub/moved\ncat /root/joint/sub/moved\necho REOPENED\nexit 0");
+    let output = String::from_utf8_lossy(&second.stdout);
+    assert!(second.status.success() && second.stderr.is_empty(), "{second:?}");
+    assert!(!output.contains("Error:"), "{output}");
+    assert!(output.contains("afterREAD_BEFORE_MOVE"), "{output}");
+    assert!(output.contains("afterREOPENED"), "{output}");
+    assert_eq!(fs::read(data.join("root/joint/sub/moved")).unwrap(), b"after");
+    assert_eq!(fs::read(&config).unwrap(), before);
+    assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
+    assert!(!store.join("catalog").exists());
+    assert!(!store.join("access.catalog").exists());
+}

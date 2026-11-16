@@ -294,7 +294,8 @@ fn real_directory_umask_group_acl_and_scope_boundaries() {
 #[test]
 fn real_process_death_recovery_keeps_live_tasks_and_unknown_tmp_contents() {
     let (data, config) = access_fixture(); let mut live = Console::start(&config);
-    assert!(!live.command("mkdir /tmp/lifetime; printf ephemeral > /tmp/lifetime/f; printf persistent > /root/persistent").contains("Error:"));
+    let created = live.command("mkdir /tmp/lifetime; printf ephemeral > /tmp/lifetime/f; printf persistent > /root/persistent");
+    assert!(!created.contains("Error:"), "{created}");
     fs::write(data.join("tmp/unknown"), b"not ours").unwrap();
     let mut observer = Console::start(&config);
     assert_eq!(observer.command("cat /tmp/lifetime/f"), "ephemeral");
@@ -326,9 +327,21 @@ fn real_job_completion_cancellation_and_fd_cleanup_leave_parent_grants_live() {
     console.command("sh -c 'touch /tmp/job-ready; sleep 30; touch /root/after-cancel' &");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !data.join("tmp/job-ready").exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(10)); }
-    assert!(data.join("tmp/job-ready").exists()); let before = Instant::now();
+    assert!(data.join("tmp/job-ready").exists());
+    // A Host name is published before its ownership catalog commits. Wait for
+    // readiness through the same namespace gate as a real reader, not an
+    // ambient exists() probe that may still observe an in-flight creation.
+    let owner_store = data.join("var/.elara-objects");
+    println!("READY_BEFORE_NAMESPACE_SYNC owner_pending={} access_pending={}",
+        owner_store.join("pending").exists(), owner_store.join("access.pending").exists());
+    assert_eq!(console.command("cat /tmp/job-ready"), "");
+    assert!(!owner_store.join("pending").exists());
+    assert!(!owner_store.join("access.pending").exists());
+    let before = Instant::now();
     assert!(console.command("kill -TERM %2; wait %2").contains("cancelled 130"));
-    assert!(before.elapsed() < Duration::from_secs(2));
+    let elapsed = before.elapsed();
+    println!("CANCEL_AND_CLEANUP_ELAPSED={elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "cancel and cleanup took {elapsed:?}");
     assert!(!data.join("tmp/job-ready").exists()); assert!(!data.join("root/after-cancel").exists());
     assert_eq!(console.command(&format!("fd readat {parent} 0 8")), "parent");
     console.finish(); println!("=== JOB LIFECYCLE CLI ===\n{}", console.trace);

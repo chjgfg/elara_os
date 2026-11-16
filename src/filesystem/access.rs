@@ -14,6 +14,7 @@ use super::{
 };
 use crate::permissions::Access;
 use crate::users::Account;
+use cap_std::fs::Dir;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -317,15 +318,21 @@ fn within(path: &str, prefix: &str) -> bool {
 }
 impl DataRoot {
     pub(super) fn load_access_catalog(&self) -> Result<AccessCatalog, FsError> {
-        let Some(store) = self.existing_owner_store()? else {
+        let Some(observed) = self.owner_store_state()? else {
             return Ok(AccessCatalog::default());
         };
+        if observed.format == super::namespace_catalog::CatalogFormat::Joint {
+            return Ok(self.joint_catalogs(&observed.dir)?.1);
+        }
+        Self::read_legacy_access_catalog(&observed.dir)
+    }
+    pub(super) fn read_legacy_access_catalog(store: &Dir) -> Result<AccessCatalog, FsError> {
         match store.symlink_metadata("access.catalog") {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(AccessCatalog::default()),
             Err(e) => Err(e.into()),
             Ok(meta) if linked(&meta) || !meta.is_file() => Err(FsError::InvalidOwnershipRecord),
             Ok(_) => AccessCatalog::decode(&read_bounded(
-                &store,
+                store,
                 Path::new("access.catalog"),
                 MAX_ACCESS_BYTES,
             )?),
@@ -1014,11 +1021,10 @@ impl DataRoot {
     }
     pub(super) fn recover_access_intent_locked(
         &self,
+        store: &Dir,
         guard: &NamespaceGuard<'_>,
     ) -> Result<(), FsError> {
-        let Some(store) = self.existing_owner_store()? else {
-            return Ok(());
-        };
+        guard.require_root(self)?;
         match store.symlink_metadata("access.pending") {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
@@ -1028,7 +1034,7 @@ impl DataRoot {
             Ok(_) => {}
         }
         let bytes = read_bounded(
-            &store,
+            store,
             Path::new("access.pending"),
             crate::config::ROOTFS_DEFAULTS.max_transaction_bytes,
         )?;
@@ -1209,8 +1215,8 @@ impl DataRoot {
             return Err(io::Error::other("injected after directory namespace").into());
         }
         if let Some((_, next)) = &intent.files {
-            self.publish_protocol_locked(
-                &store_path().join("catalog"),
+            self.publish_catalog_locked(
+                super::namespace_catalog::CatalogComponent::Files,
                 next.as_bytes(),
                 false,
                 guard,
@@ -1224,8 +1230,8 @@ impl DataRoot {
             .dir
             .symlink_metadata(store_path().join("access.catalog"))
             .is_ok();
-        let mut receipt = self.publish_protocol_locked(
-            &store_path().join("access.catalog"),
+        let mut receipt = self.publish_catalog_locked(
+            super::namespace_catalog::CatalogComponent::Access,
             &intent.new.encode()?,
             !exists,
             guard,
