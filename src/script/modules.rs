@@ -39,7 +39,7 @@ pub trait ModuleCommands {
     }
     fn execute(&mut self, request: Request<'_>) -> Result<Dispatch, String>;
     fn execute_as(&mut self, actor: &Account, request: Request<'_>) -> Result<Dispatch, String> {
-        if matches!(actor.identity, crate::users::Identity::Executed(_)) {
+        if !matches!(actor.identity, crate::users::Identity::Login) {
             return Err("module does not support explicit execution credentials".into());
         }
         self.execute(request)
@@ -77,7 +77,7 @@ pub struct SystemModules<'a> {
 }
 impl ModuleCommands for SystemModules<'_> {
     fn execute_as(&mut self, actor: &Account, request: Request<'_>) -> Result<Dispatch, String> {
-        if actor.session_uid() != self.user.session_uid() {
+        if !actor.same_execution_domain(self.user) {
             return Err("module session mismatch".into());
         }
         SystemModules {
@@ -110,6 +110,11 @@ impl ModuleCommands for SystemModules<'_> {
             .map_err(|e| e.to_string())
     }
     fn execute(&mut self, request: Request<'_>) -> Result<Dispatch, String> {
+        if self.user.application_domain().is_some() && !matches!(request.name,
+            "fd" | "mv" | "cp" | "stat" | "find" | "du" | "wc" | "sleep" | "wait") {
+            return Err("application domain cannot use administrative modules".into());
+        }
+        self.root.validate_application(self.user).map_err(|e| e.to_string())?;
         let Request {
             creation,
             name,
@@ -211,6 +216,9 @@ impl ModuleCommands for SystemModules<'_> {
                 };
                 let duration = tasks::parse_seconds(seconds).map_err(|e| e.to_string())?;
                 if background {
+                    if self.user.application_domain().is_some() {
+                        return Err("applications use scoped sleep N &; detached timers are not granted".into());
+                    }
                     let id = self
                         .tasks
                         .spawn_sleep_observed(self.root, self.user.session_uid(), duration)

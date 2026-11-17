@@ -17,6 +17,7 @@ pub struct Resources {
     tasks: Arc<Mutex<TaskTable>>,
     files: Arc<Mutex<FdSession>>,
     pub logger: Arc<Logger>,
+    domain: Option<crate::filesystem::ApplicationDomain>,
 }
 impl Resources {
     pub fn new(uid: u32, logger: Arc<Logger>, task_capacity: usize) -> Result<Self, String> {
@@ -24,7 +25,13 @@ impl Resources {
             tasks: Arc::new(Mutex::new(TaskTable::new(task_capacity))),
             files: Arc::new(Mutex::new(FdSession::new(uid).map_err(|e| e.to_string())?)),
             logger,
+            domain: None,
         })
+    }
+    pub(crate) fn for_application(user: &Account, logger: Arc<Logger>) -> Result<Self, String> {
+        let mut resources = Self::new(user.session_uid(), logger, 16)?;
+        resources.domain = Some(user.application_domain().ok_or("missing application domain")?.clone());
+        Ok(resources)
     }
     pub fn switch_owner(&self, uid: u32) -> Result<usize, String> {
         // Same task -> descriptors lock order as command dispatch. Acquire both
@@ -63,7 +70,7 @@ impl<'a> SharedModules<'a> {
 }
 impl ModuleCommands for SharedModules<'_> {
     fn execute_as(&mut self, actor: &Account, request: Request<'_>) -> Result<Dispatch, String> {
-        if actor.session_uid() != self.user.session_uid() { return Err("module session mismatch".into()); }
+        if !actor.same_execution_domain(&self.user) { return Err("module session mismatch".into()); }
         let old = std::mem::replace(&mut self.user, actor.clone());
         let result = self.execute(request);
         self.user = old;
@@ -81,7 +88,8 @@ impl ModuleCommands for SharedModules<'_> {
         worker: Worker,
     ) -> Result<ModuleFork<'a>, String> {
         if !std::ptr::eq(self.root, root)
-            || self.user.session_uid() != user.session_uid()
+            || !self.user.same_execution_domain(user)
+            || user.application_domain() != self.resources.domain.as_ref()
             || (matches!(user.identity, crate::users::Identity::Login) && self.user != *user)
         {
             return Err("module fork rejected: root/actor mismatch".into());
@@ -111,6 +119,13 @@ impl ModuleCommands for SharedModules<'_> {
             .map_err(|e| e.to_string())
     }
     fn execute(&mut self, request: Request<'_>) -> Result<Dispatch, String> {
+        if self.user.application_domain() != self.resources.domain.as_ref() {
+            return Err("module resource domain mismatch".into());
+        }
+        if request.name == "app" && request.args.first().is_some_and(|s| s == "run") && self.worker.is_some() {
+            return Err("app run currently requires a foreground session".into());
+        }
+        self.root.validate_application(&self.user).map_err(|e| e.to_string())?;
         if let Some(scope) = request.creation.scope { self.active_task = Some(scope.id()); }
         if let Some(worker) = &self.worker {
             worker.checkpoint().map_err(|e| e.to_string())?;

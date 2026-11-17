@@ -76,6 +76,7 @@ pub struct Context {
     cwd_pin: Option<crate::filesystem::WorkingDirectory>,
     pub umask: crate::filesystem::Umask,
     actor_uid: Option<u32>,
+    actor_domain: Option<crate::filesystem::ApplicationDomain>,
     fs_task: std::sync::Arc<std::sync::OnceLock<crate::filesystem::TaskScope>>,
     vars: BTreeMap<String, String>,
     functions: BTreeMap<String, List>,
@@ -144,6 +145,9 @@ impl Context {
             Ok(Default::default())
         }
     }
+    pub(super) fn set_application_parameters(&mut self, parameters: Vec<String>) {
+        self.parameters = parameters;
+    }
     pub fn status(&self) -> u8 {
         self.last
     }
@@ -151,11 +155,19 @@ impl Context {
         self.last = status;
     }
     pub fn prepare_identity(&mut self, user: &Account) {
-        if self.actor_uid.is_some_and(|uid| uid != user.uid) {
-            let cwd = self.cwd.clone();
+        if self.actor_uid.is_some_and(|uid| uid != user.uid || self.actor_domain.as_ref() != user.application_domain()) {
+            // Switching application domains must not retain the old domain's cwd:
+            // the new actor has no authority over the previous working directory.
+            let cwd = match &user.identity {
+                crate::users::Identity::Application { domain, .. } => {
+                    VirtualPath::strict(domain.home()).unwrap_or_else(|_| VirtualPath::root())
+                }
+                _ => self.cwd.clone(),
+            };
             *self = Self::new(cwd);
         }
         self.actor_uid = Some(user.uid);
+        self.actor_domain = user.application_domain().cloned();
         self.vars
             .entry("HOME".into())
             .or_insert_with(|| user.home.clone());
@@ -172,6 +184,7 @@ impl Context {
             cwd_pin: None,
             umask: crate::filesystem::Umask::default(),
             actor_uid: None,
+            actor_domain: None,
             fs_task: std::sync::Arc::new(std::sync::OnceLock::new()),
             vars: BTreeMap::new(),
             functions: BTreeMap::new(),
@@ -785,6 +798,7 @@ impl Engine<'_, '_, '_> {
         Ok(path.to_string())
     }
     fn list(&mut self, list: &List) -> Result<Flow, String> {
+        self.root.validate_application(&self.user).map_err(|e| e.to_string())?;
         let mut status = 0;
         for node in list {
             let ticked = self.tick();
@@ -1387,7 +1401,7 @@ impl Engine<'_, '_, '_> {
                         self.user.uid,
                         credentials.gid,
                     ),
-                    crate::users::Identity::Executed(id) => {
+                    crate::users::Identity::Executed(id) | crate::users::Identity::Application { credentials: id, .. } => {
                         (id.real_uid, id.real_gid, id.saved_uid, id.saved_gid)
                     }
                 };
@@ -2151,6 +2165,7 @@ pub fn execute_interactive(
 #[derive(Clone, Copy)]
 enum Boundary {
     Program,
+    Application,
     PromptLine,
 }
 struct Entry<'scope, 'env> {
@@ -2203,6 +2218,22 @@ pub fn execute_job<'scope, 'env>(
             budget: job.budget,
         },
     )
+}
+/// Application programs run EXIT traps even on normal EOF. Their caller joins
+/// private jobs before task cleanup, unlike a standalone Program boundary.
+pub(super) fn execute_application<'scope, 'env>(
+    list: &List,
+    root: &'env DataRoot,
+    user: &Account,
+    context: &mut Context,
+    modules: &mut dyn ModuleCommands,
+    jobs: super::jobs::JobTable<'scope, 'env>,
+) -> Report {
+    context.prepare_identity(user);
+    let parameters = context.parameters.clone();
+    let mut entry = Entry::new(Boundary::Application);
+    entry.jobs = Some(jobs);
+    execute_entry(list, root, user, context, &parameters, modules, entry)
 }
 pub fn execute_in_session<'scope, 'env>(
     list: &List,
@@ -2320,7 +2351,7 @@ fn execute_entry<'scope, 'env>(
     };
     let result = engine.list(list);
     let result =
-        if matches!(entry.boundary, Boundary::Program) || matches!(result, Ok(Flow::Exit(_))) {
+        if matches!(entry.boundary, Boundary::Program | Boundary::Application) || matches!(result, Ok(Flow::Exit(_))) {
             engine.finish_trap(result)
         } else {
             result

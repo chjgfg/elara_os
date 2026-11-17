@@ -1,5 +1,6 @@
 //! Script entry point; filesystem and other system modules are used through their interfaces.
 mod access;
+mod application;
 mod vfs;
 mod resources;
 pub mod arithmetic;

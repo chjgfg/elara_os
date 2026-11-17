@@ -25,6 +25,7 @@ pub struct DirectoryCursor {
     position: usize,
     namespace: Option<NamespaceView>,
     host_view: Option<super::host_directory::HostDirectoryView>,
+    application: Option<(std::sync::Arc<DataRoot>, crate::users::Account)>,
 }
 struct NamespaceView {
     registry: std::sync::Arc<super::vfs::Registry>,
@@ -49,6 +50,13 @@ fn merge_mounts(
     Ok(())
 }
 impl DirectoryCursor {
+    pub(super) fn bind_application(mut self, root: &DataRoot, actor: &crate::users::Account) -> Result<Self, FsError> {
+        if actor.application_domain().is_some() {
+            self.application = Some((std::sync::Arc::new(root.clone_file_domain()?), actor.clone()));
+        }
+        Ok(self)
+    }
+
     pub(super) fn with_host_links(
         mut self,
         root: &DataRoot,
@@ -100,6 +108,7 @@ impl DirectoryCursor {
             position: 0,
             namespace: None,
             host_view: None,
+            application: None,
         })
     }
     pub fn len(&self) -> usize {
@@ -115,6 +124,15 @@ impl DirectoryCursor {
         self.position = 0;
     }
     pub fn seek(&mut self, position: usize) -> Result<usize, FsError> {
+        let application = self.application.clone();
+        let _application_guard = match &application {
+            Some((root, actor)) => {
+                let guard = root.namespace_guard()?;
+                root.validate_application_locked(actor, &root.load_access_catalog()?)?;
+                Some(guard)
+            }
+            None => None,
+        };
         if position > self.entries.len() {
             return Err(FsError::InvalidOffset);
         }
@@ -122,6 +140,15 @@ impl DirectoryCursor {
         Ok(position)
     }
     pub fn read(&mut self, maximum: usize) -> Result<Vec<DirectoryEntry>, FsError> {
+        let application = self.application.clone();
+        let _application_guard = match &application {
+            Some((root, actor)) => {
+                let guard = root.namespace_guard()?;
+                root.validate_application_locked(actor, &root.load_access_catalog()?)?;
+                Some(guard)
+            }
+            None => None,
+        };
         if maximum > ROOTFS_DEFAULTS.max_directory_page {
             return Err(FsError::DirectoryPageTooLarge);
         }
@@ -137,9 +164,21 @@ impl DirectoryCursor {
         Ok(page)
     }
     pub fn refresh(&mut self) -> Result<(), FsError> {
+        let application = self.application.clone();
+        let _application_guard = match &application {
+            Some((root, actor)) => {
+                let guard = root.namespace_guard()?;
+                root.validate_application_locked(actor, &root.load_access_catalog()?)?;
+                Some(guard)
+            }
+            None => None,
+        };
         let mut entries = match &self.directory {
             DirectoryBackend::Host(dir) => match &self.host_view {
-                Some(view) => view.snapshot(dir)?,
+                Some(view) => match (&application, &_application_guard) {
+                    (Some((root, _)), Some(guard)) => view.snapshot_locked(root, dir, guard)?,
+                    _ => view.snapshot(dir)?,
+                },
                 None => snapshot(dir)?,
             },
             DirectoryBackend::Virtual(dir) => virtual_snapshot(dir)?,
@@ -182,6 +221,7 @@ impl DataRoot {
             position: 0,
             namespace: None,
             host_view: None,
+            application: None,
         })
     }
 }

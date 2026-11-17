@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{format, matches};
 pub(super) const MAX_ACCESS_BYTES: usize = 400 * 1024;
+const MAGIC_GENERATIONS: &[u8] = b"ELARA_ACCESS_CATALOG_V8
+";
 const MAGIC_ASSOCIATIONS: &[u8] = b"ELARA_ACCESS_CATALOG_V7
 ";
 const MAGIC_RESOURCES: &[u8] = b"ELARA_ACCESS_CATALOG_V6
@@ -277,7 +279,7 @@ impl AccessCatalog {
     pub fn actor_credentials(&self, actor: &crate::users::Account) -> Credentials {
         match &actor.identity {
             crate::users::Identity::Login => self.credentials(actor.uid),
-            crate::users::Identity::Executed(id) => {
+            crate::users::Identity::Executed(id) | crate::users::Identity::Application { credentials: id, .. } => {
                 let mut groups = id.supplementary.clone();
                 groups.insert(id.effective_gid);
                 Credentials {
@@ -373,7 +375,9 @@ impl AccessCatalog {
     }
     pub fn encode(&self) -> Result<Vec<u8>, FsError> {
         self.validate()?;
-        let magic = if self
+        let magic = if self.resources.values().any(|r| r.generation != 0) {
+            MAGIC_GENERATIONS
+        } else if self
             .resources
             .values()
             .any(|r| !r.association.is_independent())
@@ -415,6 +419,7 @@ impl AccessCatalog {
             .or_else(|| bytes.strip_prefix(MAGIC_RUNTIME))
             .or_else(|| bytes.strip_prefix(MAGIC_RESOURCES))
             .or_else(|| bytes.strip_prefix(MAGIC_ASSOCIATIONS))
+            .or_else(|| bytes.strip_prefix(MAGIC_GENERATIONS))
             .ok_or(FsError::InvalidOwnershipRecord)?;
         let value: Self =
             serde_json::from_slice(body).map_err(|_| FsError::InvalidOwnershipRecord)?;

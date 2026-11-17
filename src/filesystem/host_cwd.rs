@@ -71,6 +71,7 @@ impl DataRoot {
     ) -> Result<(), FsError> {
         let _guard = self.namespace_guard()?;
         let catalog = self.load_access_catalog()?;
+        self.validate_application_locked(actor, &catalog)?;
         self.search_locked(actor, path, &catalog)?;
         match anchor {
             HostAnchor::Protected => {

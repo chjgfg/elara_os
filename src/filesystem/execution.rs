@@ -61,8 +61,15 @@ impl ExecutableImage {
         actor: &Account,
     ) -> Result<Account, FsError> {
         use crate::users::{ExecutionIdentity, Identity};
+        if actor.application_domain().is_some() {
+            root.validate_application(actor)?;
+            if self.file.mode().is_setuid() || self.file.mode().is_setgid() {
+                return Err(FsError::OwnershipDenied);
+            }
+            return Ok(actor.clone());
+        }
         let prior = match &actor.identity {
-            Identity::Executed(id) => id.clone(),
+            Identity::Executed(id) | Identity::Application { credentials: id, .. } => id.clone(),
             Identity::Login => {
                 let mut supplementary = self.authorized_as.groups.clone();
                 supplementary.remove(&self.authorized_as.gid);

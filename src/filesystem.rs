@@ -20,6 +20,8 @@ mod modes;
 mod namespace;
 mod namespace_access;
 mod namespace_resolution;
+mod application;
+pub use application::ApplicationDomain;
 mod namespace_catalog;
 pub use namespace_catalog::CatalogUpgrade;
 mod objects;

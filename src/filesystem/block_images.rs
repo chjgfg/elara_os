@@ -16,7 +16,7 @@ fn error(error: block_store::Error) -> FsError {
 }
 impl DataRoot {
     fn block_image_path(&self, actor: &Account, image: &str, write: bool) -> Result<(), FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let path = super::ownership_model::key(image)?;
@@ -75,7 +75,7 @@ impl DataRoot {
         actor: &Account,
         point: &str,
     ) -> Result<block_store::Records, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let vfs::Route::Mounted { volume, path, .. } = self.mounted(actor, point, Access::Read)?

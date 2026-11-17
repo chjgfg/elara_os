@@ -1173,3 +1173,61 @@ fn joint_catalog_real_process_upgrade_and_restart_use_single_authority() {
     assert!(!store.join("catalog").exists());
     assert!(!store.join("access.catalog").exists());
 }
+
+
+#[test]
+fn application_real_process_has_private_context_fds_jobs_and_bounded_paths() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-data")
+        .join(format!("application-cli-{}-{nonce}", std::process::id()));
+    fs::create_dir_all(&parent).unwrap();
+    let parent = parent.canonicalize().unwrap();
+    let data = parent.join("data");
+    let config = parent.join("fixture.env");
+    fs::write(&config, format!("ELARA_DATA_ROOT={}
+", data.display())).unwrap();
+    let config_before = fs::read(&config).unwrap();
+    fs::write(parent.join("sentinel"), b"outside").unwrap();
+    elara_os::initialization::prepare(&data).unwrap();
+    let root = DataRoot::open(&data).unwrap();
+    users::ensure_passwd(&root).unwrap();
+    let user = Account { identity: Default::default(), name: "root".into(), uid: 0, home: "/root".into() };
+    let quota = elara_os::filesystem::ResourceLimits { bytes: 16384, objects: 32 };
+    root.register_resource_as(&user, "/opt/demo", elara_os::filesystem::ResourceKind::Application, quota).unwrap();
+    root.register_application_location_as(&user, "/opt/demo", "/root/demo-data", elara_os::filesystem::ResourceKind::ApplicationData, quota).unwrap();
+    root.create_owned_file(&user, "/root/secret", b"PARENT_SECRET", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.create_owned_file(&user, "/opt/demo/main", br#"printf 'APP:%s:%s
+' "${PRIVATE-unset}" "$1"
+fd read 0:1 64 || echo FD_DENIED
+cat /root/secret || echo PATH_DENIED
+printf bad > /opt/demo/new || echo IMAGE_READONLY
+source -c 'printf ok > /root/demo-data/result'
+sh -c 'cat /root/secret' || echo CHILD_DENIED
+sh -c 'sleep 10; touch /root/demo-data/late' &
+exit 7"#, VirtualMode::new(0o700).unwrap()).unwrap();
+    root.create_owned_file(&user, "/opt/demo/natural", br#"trap 'echo APP_EOF_TRAP; printf done > /root/demo-data/exit-trap' EXIT
+printf normal
+"#, VirtualMode::new(0o700).unwrap()).unwrap();
+    let out = run(&config, "PRIVATE=parent
+fd open /root/secret read
+app run /opt/demo main argument
+echo APP_STATUS:$?
+app run /opt/demo natural
+echo NATURAL_STATUS:$?
+fd read 0:1 64
+echo PARENT_ALIVE
+exit 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    for expected in ["APP:unset:argument", "FD_DENIED", "PATH_DENIED", "IMAGE_READONLY", "CHILD_DENIED", "APP_STATUS:7", "normalAPP_EOF_TRAP", "NATURAL_STATUS:0", "PARENT_SECRETPARENT_ALIVE"] {
+        assert!(stdout.contains(expected), "missing {expected}: {stdout}");
+    }
+    assert_eq!(fs::read(data.join("root/demo-data/result")).unwrap(), b"ok");
+    assert_eq!(fs::read(data.join("root/demo-data/exit-trap")).unwrap(), b"done");
+    assert_eq!(stdout.matches("APP_EOF_TRAP").count(), 1, "application EXIT trap runs once");
+    assert!(!data.join("opt/demo/new").exists());
+    assert!(!data.join("root/demo-data/late").exists());
+    assert_eq!(fs::read(parent.join("sentinel")).unwrap(), b"outside");
+    assert_eq!(fs::read(&config).unwrap(), config_before);
+}

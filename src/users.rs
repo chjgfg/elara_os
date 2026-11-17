@@ -31,6 +31,7 @@ pub enum Identity {
     #[default]
     Login,
     Executed(ExecutionIdentity),
+    Application { credentials: ExecutionIdentity, domain: crate::filesystem::ApplicationDomain },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionIdentity {
@@ -42,11 +43,17 @@ pub struct ExecutionIdentity {
     pub supplementary: std::collections::BTreeSet<u32>,
 }
 impl Account {
+    pub fn application_domain(&self) -> Option<&crate::filesystem::ApplicationDomain> {
+        match &self.identity { Identity::Application { domain, .. } => Some(domain), _ => None }
+    }
+    pub(crate) fn same_execution_domain(&self, other: &Self) -> bool {
+        self.session_uid() == other.session_uid() && self.application_domain() == other.application_domain()
+    }
     pub fn session_uid(&self) -> u32 {
-        match &self.identity { Identity::Login => self.uid, Identity::Executed(id) => id.real_uid }
+        match &self.identity { Identity::Login => self.uid, Identity::Executed(id) | Identity::Application { credentials: id, .. } => id.real_uid }
     }
     pub fn is_admin(&self) -> bool {
-        self.uid == ROOT_UID
+        self.uid == ROOT_UID && self.application_domain().is_none()
     }
 }
 

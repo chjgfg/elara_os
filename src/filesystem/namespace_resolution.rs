@@ -18,6 +18,7 @@ impl DataRoot {
         let path = user_path(actor, path, access)?.to_string();
         if path.len() > 4096 { return Err(FsError::InvalidPath); }
         let permissions = self.load_access_catalog()?;
+        self.validate_application_locked(actor, &permissions)?;
         let credentials = permissions.actor_credentials(actor);
         let mut catalog = None;
         let mut catalog_loaded = false;
@@ -61,7 +62,12 @@ impl DataRoot {
             let candidate = format!("{}/{name}", current.trim_end_matches('/'));
             VirtualPath::strict(&candidate).map_err(|_| FsError::InvalidPath)?;
             if candidate.len() > 4096 { return Err(FsError::InvalidPath); }
-            user_path(actor, &candidate, Access::Read)?;
+            if pending.is_empty() {
+                user_path(actor, &candidate, Access::Read)?;
+            } else {
+                crate::permissions::check_search(actor, &VirtualPath::strict(&candidate).map_err(|_| FsError::InvalidPath)?)
+                    .map_err(|e| FsError::AccessDenied(e.to_string()))?;
+            }
             self.refresh_resolution_providers(&candidate, &mut refreshed, guard)?;
             let route = self.vfs.route_as(&credentials, &candidate)?;
             let link = match &route {

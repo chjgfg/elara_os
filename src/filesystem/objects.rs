@@ -30,6 +30,7 @@ struct FileObject {
 struct HostFile {
     inner: Arc<Mutex<FileObject>>,
     domain: IoDomain,
+    application: Option<Arc<crate::users::Account>>,
 }
 #[derive(Clone)]
 enum IoDomain {
@@ -129,6 +130,7 @@ impl HostFile {
                 fail_append_position: false,
             })),
             domain: IoDomain::Legacy,
+            application: None,
         }
     }
     pub(super) fn new_owned(
@@ -150,6 +152,7 @@ impl HostFile {
                 fail_append_position: false,
             })),
             domain: IoDomain::Managed(root),
+            application: None,
         }
     }
     fn lock(&self) -> Result<FileObjectGuard<'_>, FsError> {
@@ -160,6 +163,9 @@ impl HostFile {
                 guard: root.namespace_guard()?,
             },
         };
+        if let (Some(actor), GuardDomain::Managed { root, .. }) = (&self.application, &domain) {
+            root.validate_application_locked(actor, &root.load_access_catalog()?)?;
+        }
         let file = self.inner.lock().map_err(|_| FsError::FileObjectPoisoned)?;
         Ok(FileObjectGuard {
             object: file,
@@ -403,11 +409,36 @@ enum BackendFile {
 #[derive(Clone)]
 pub struct OpenFile {
     backend: BackendFile,
+    // Host checks belong inside HostFile::lock to avoid recursive namespace locking.
+    virtual_application: Option<(Arc<DataRoot>, Arc<crate::users::Account>)>,
 }
 impl OpenFile {
+    pub(super) fn bind_application(mut self, root: &DataRoot, actor: &crate::users::Account) -> Result<Self, FsError> {
+        if actor.application_domain().is_none() { return Ok(self); }
+        match &mut self.backend {
+            BackendFile::Host(file) => {
+                if let IoDomain::Legacy = file.domain {
+                    file.domain = IoDomain::Managed(Arc::new(root.clone_file_domain()?));
+                }
+                file.application = Some(Arc::new(actor.clone()));
+            }
+            BackendFile::Virtual { .. } => {
+                self.virtual_application = Some((Arc::new(root.clone_file_domain()?), Arc::new(actor.clone())));
+            }
+        }
+        Ok(self)
+    }
+    fn application_guard(&self) -> Result<Option<NamespaceGuard<'_>>, FsError> {
+        let Some((root, actor)) = &self.virtual_application else { return Ok(None); };
+        let guard = root.namespace_guard()?;
+        root.validate_application_locked(actor, &root.load_access_catalog()?)?;
+        Ok(Some(guard))
+    }
+
     pub(super) fn new(file: File, mode: FileMode, path: String) -> Self {
         Self {
             backend: BackendFile::Host(HostFile::new(file, mode, path)),
+            virtual_application: None,
         }
     }
     pub(super) fn new_owned(
@@ -418,17 +449,24 @@ impl OpenFile {
     ) -> Self {
         Self {
             backend: BackendFile::Host(HostFile::new_owned(file, mode, info, lease)),
+            virtual_application: None,
         }
     }
     pub(super) fn new_virtual(file: super::vfs::File, mode: FileMode, path: String) -> Self {
         Self {
             backend: BackendFile::Virtual { file, mode, path },
+            virtual_application: None,
         }
     }
     /// Compare the opened backing objects, never their possibly stale names.
     /// Host probes may be Unconfirmed (e.g. readonly or externally locked).
     pub fn compare_identity(&self, other: &Self) -> Result<super::ObjectBinding, FsError> {
         use super::ObjectBinding;
+        let application_bound = |file: &Self| file.virtual_application.is_some()
+            || std::matches!(&file.backend, BackendFile::Host(host) if host.application.is_some());
+        if application_bound(self) || application_bound(other) {
+            return Err(FsError::OwnershipDenied);
+        }
         match (&self.backend, &other.backend) {
             (BackendFile::Host(a), BackendFile::Host(b)) => a.compare_identity(b),
             (BackendFile::Virtual { file: a, .. }, BackendFile::Virtual { file: b, .. }) => Ok(
@@ -442,6 +480,7 @@ impl OpenFile {
         }
     }
     pub fn info(&self) -> Result<FileInfo, FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.info(),
             BackendFile::Virtual { file, mode, path } => {
@@ -460,60 +499,70 @@ impl OpenFile {
         }
     }
     pub fn read(&self, n: usize) -> Result<Vec<u8>, FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.read(n),
             BackendFile::Virtual { file, .. } => Ok(file.read(n)?),
         }
     }
     pub fn write(&self, b: &[u8]) -> Result<usize, FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.write(b),
             BackendFile::Virtual { file, .. } => Ok(file.write(b)?),
         }
     }
     pub fn read_at(&self, o: u64, n: usize) -> Result<Vec<u8>, FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.read_at(o, n),
             BackendFile::Virtual { file, .. } => Ok(file.read_at(o, n)?),
         }
     }
     pub fn write_at(&self, o: u64, b: &[u8]) -> Result<usize, FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.write_at(o, b),
             BackendFile::Virtual { file, .. } => Ok(file.write_at(o, b)?),
         }
     }
     pub fn seek(&self, p: SeekFrom) -> Result<u64, FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.seek(p),
             BackendFile::Virtual { file, .. } => Ok(file.seek(p)?),
         }
     }
     pub fn truncate(&self, n: u64) -> Result<(), FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.truncate(n),
             BackendFile::Virtual { file, .. } => Ok(file.truncate(n)?),
         }
     }
     pub fn sync_data(&self) -> Result<(), FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.sync_data(),
             BackendFile::Virtual { .. } => Err(super::vfs::Error::Unsupported.into()),
         }
     }
     pub fn sync_all(&self) -> Result<(), FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Host(f) => f.sync_all(),
             BackendFile::Virtual { .. } => Err(super::vfs::Error::Unsupported.into()),
         }
     }
     pub fn lock(&self, mode: super::vfs::LockMode) -> Result<(), FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Virtual { file, .. } => Ok(file.lock(mode)?),
             BackendFile::Host(file) => file.set_lock(Some(mode)),
         }
     }
     pub fn unlock(&self) -> Result<(), FsError> {
+        let _application_guard = self.application_guard()?;
         match &self.backend {
             BackendFile::Virtual { file, .. } => Ok(file.unlock()?),
             BackendFile::Host(file) => file.set_lock(None),

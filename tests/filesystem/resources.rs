@@ -945,3 +945,233 @@ fn resources_registration_publish_denial_keeps_intent_and_recovers_exact_id() {
         record.id
     );
 }
+
+
+#[test]
+fn application_domain_confines_paths_links_admin_and_root_family() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.register_application_location_as(&user, "/opt/app", "/root/app-data", ResourceKind::ApplicationData, limits(8192, 32)).unwrap();
+    root.create_owned_file(&user, "/opt/app/image", b"echo app", VirtualMode::new(0o700).unwrap()).unwrap();
+    root.create_owned_file(&user, "/root/secret", b"secret", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.symlink_as(&user, "/root/secret", "/opt/app/escape").unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    assert!(!actor.is_admin());
+    assert_eq!(root.read_file_as(&actor, "/opt/app/image", 64).unwrap(), b"echo app");
+    assert!(root.read_file_as(&actor, "/root/secret", 64).is_err());
+    assert!(root.read_file_as(&actor, "/opt/app/escape", 64).is_err());
+    assert!(root.list_as(&actor, "/root").is_err());
+    assert!(root.create_file_as(&actor, "/opt/app/write").is_err());
+    root.create_file_as(&actor, "/root/app-data/allowed").unwrap();
+    assert!(root.create_file_as(&actor, "/root/app-data-other").is_err());
+    assert!(root.resources_as(&actor).is_err());
+    assert!(root.upgrade_catalog_as(&actor).is_err());
+    assert!(root.application_account_as(&actor, "/opt/app").is_err());
+    let other = DataRoot::open(&fixture()).unwrap();
+    assert!(other.credentials_as(&actor).is_err());
+    assert!(other.read_file_as(&actor, "/opt/app/image", 64).is_err());
+    root.resource_quota_as(&user, "/opt/app", limits(16384, 32)).unwrap();
+    assert!(root.read_file_as(&actor, "/opt/app/image", 64).is_err(), "changed resource snapshot must revoke the old domain");
+}
+
+#[test]
+fn application_domain_rejects_setid_cross_mount_and_other_application() {
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    for app in ["/opt/a", "/opt/b"] {
+        root.register_resource_as(&user, app, ResourceKind::Application, limits(8192, 32)).unwrap();
+    }
+    root.mount_memory_as(&user, "/mnt/external", vfs::Limits { bytes: 8192, inodes: 32 }).unwrap();
+    root.create_file_with_options(&user, "/mnt/external/private", b"mounted-secret", CreationOptions::default()).unwrap();
+    root.create_owned_file(&user, "/opt/b/private", b"other-app", VirtualMode::new(0o600).unwrap()).unwrap();
+    root.symlink_as(&user, "/mnt/external/private", "/opt/a/mounted").unwrap();
+    root.symlink_as(&user, "/opt/b/private", "/opt/a/other").unwrap();
+    let actor = root.application_account_as(&user, "/opt/a").unwrap();
+    for path in ["/opt/a/mounted", "/opt/a/other", "/opt/b/private"] {
+        assert!(root.read_file_as(&actor, path, 64).is_err(), "{path}");
+    }
+    assert!(root.mount_memory_as(&actor, "/mnt/forbidden", vfs::Limits { bytes: 8192, inodes: 32 }).is_err());
+    for (name, bits) in [("suid", 0o4700), ("sgid", 0o2700)] {
+        let path = std::format!("/opt/a/{name}");
+        root.create_owned_file(&user, &path, b"echo forbidden", VirtualMode::new(bits).unwrap()).unwrap();
+        let image = root.load_executable_as(&actor, &path, 64).unwrap();
+        assert!(image.execution_account(&root, &actor).is_err(), "{name} must not drop the application domain");
+    }
+    root.create_owned_file(&user, "/opt/a/plain", b"true", VirtualMode::new(0o700).unwrap()).unwrap();
+    let image = root.load_executable_as(&actor, "/opt/a/plain", 64).unwrap();
+    assert_eq!(image.execution_account(&root, &actor).unwrap(), actor);
+}
+
+#[test]
+fn application_open_handles_and_clones_revoke_without_revoking_admin_handles() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.register_application_location_as(&user, "/opt/app", "/root/app-data", ResourceKind::ApplicationData, limits(8192, 32)).unwrap();
+    root.create_owned_file(&user, "/root/app-data/file", b"kept", VirtualMode::new(0o600).unwrap()).unwrap();
+    // Unknown read-only legacy files must not escape the same revocation policy.
+    std::fs::write(path.join("opt/app/legacy"), b"legacy").unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    let handle = root.open_file_as(&actor, "/root/app-data/file", rw()).unwrap();
+    let clone = handle.clone();
+    let legacy = root.open_file_as(&actor, "/opt/app/legacy", FileMode::READ).unwrap();
+    let administrative = root.open_file_as(&user, "/root/app-data/file", rw()).unwrap();
+    assert_eq!(handle.read_at(0, 4).unwrap(), b"kept");
+    assert_eq!(legacy.read_at(0, 6).unwrap(), b"legacy");
+    root.resource_quota_as(&user, "/opt/app", limits(16384, 32)).unwrap();
+    for revoked in [&handle, &clone] {
+        assert!(revoked.read(1).is_err());
+        assert!(revoked.read_at(0, 1).is_err());
+        assert!(revoked.write(b"x").is_err());
+        assert!(revoked.write_at(0, b"x").is_err());
+        assert!(revoked.truncate(0).is_err());
+        assert!(revoked.seek(std::io::SeekFrom::Start(0)).is_err());
+        assert!(revoked.info().is_err());
+        assert!(revoked.sync_data().is_err());
+        assert!(revoked.sync_all().is_err());
+        assert!(revoked.lock(vfs::LockMode::Shared).is_err());
+    }
+    assert!(legacy.read_at(0, 6).is_err());
+    assert_eq!(administrative.read_at(0, 4).unwrap(), b"kept");
+    assert_eq!(std::fs::read(path.join("root/app-data/file")).unwrap(), b"kept");
+    // A freshly admitted domain receives the changed grant, not the stale one.
+    let current = root.application_account_as(&user, "/opt/app").unwrap();
+    assert_eq!(root.open_file_as(&current, "/root/app-data/file", rw()).unwrap().read_at(0, 4).unwrap(), b"kept");
+}
+
+#[test]
+fn application_virtual_handle_binding_checks_revocation_before_volume_io() {
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.mount_memory_as(&user, "/mnt/probe", vfs::Limits { bytes: 8192, inodes: 32 }).unwrap();
+    root.create_file_with_options(&user, "/mnt/probe/file", b"kept", CreationOptions::default()).unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    // Internal capability binding test; the public path gate denies this mount.
+    assert!(root.open_file_as(&actor, "/mnt/probe/file", rw()).is_err());
+    let handle = root.open_file_as(&user, "/mnt/probe/file", rw()).unwrap().bind_application(&root, &actor).unwrap();
+    assert_eq!(handle.read_at(0, 4).unwrap(), b"kept");
+    root.resource_quota_as(&user, "/opt/app", limits(16384, 32)).unwrap();
+    assert!(handle.read_at(0, 4).is_err());
+    assert!(handle.write_at(0, b"bad").is_err());
+    assert!(handle.info().is_err());
+    assert_eq!(root.read_file_as(&user, "/mnt/probe/file", 64).unwrap(), b"kept");
+}
+
+#[test]
+fn application_directory_and_cwd_revoke_without_refreshing_cached_names() {
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.create_owned_file(&user, "/opt/app/first", b"kept", VirtualMode::new(0o600).unwrap()).unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    let mut cursor = root.open_directory_as(&actor, "/opt/app").unwrap();
+    let mut administrative = root.open_directory_as(&user, "/opt/app").unwrap();
+    let cwd = root.working_directory_as(&actor, "/opt/app").unwrap();
+    cursor.refresh().unwrap();
+    assert_eq!(cursor.read(32).unwrap().len(), 1);
+    cwd.validate_as(&root, &actor).unwrap();
+    root.resource_quota_as(&user, "/opt/app", limits(16384, 32)).unwrap();
+    root.create_owned_file(&user, "/opt/app/later", b"new", VirtualMode::new(0o600).unwrap()).unwrap();
+    cursor.rewind();
+    assert!(cursor.read(32).is_err(), "cached names remain behind the domain gate");
+    assert!(cursor.seek(0).is_err());
+    assert!(cursor.refresh().is_err(), "revoked refresh must not observe new names");
+    assert_eq!(cursor.len(), 1, "failed refresh preserves the old local snapshot");
+    assert!(cwd.validate_as(&root, &actor).is_err());
+    administrative.refresh().unwrap();
+    assert_eq!(administrative.read(32).unwrap().len(), 2);
+}
+
+#[test]
+fn application_uninstall_revokes_live_handles_cursors_and_cwd() {
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.create_owned_file(&user, "/opt/app/file", b"kept", VirtualMode::new(0o600).unwrap()).unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    let file = root.open_file_as(&actor, "/opt/app/file", FileMode::READ).unwrap();
+    let clone = file.clone();
+    let administrative = root.open_file_as(&user, "/opt/app/file", FileMode::READ).unwrap();
+    let mut cursor = root.open_directory_as(&actor, "/opt/app").unwrap();
+    let cwd = root.working_directory_as(&actor, "/opt/app").unwrap();
+    assert!(file.compare_identity(&clone).is_err(), "application identity probes are not granted");
+    assert!(administrative.compare_identity(&file).is_err());
+    assert!(file.compare_identity(&administrative).is_err());
+    assert_eq!(administrative.compare_identity(&administrative).unwrap(), ObjectBinding::SameObject);
+    root.remove_resource_as(&user, "/opt/app").unwrap();
+    assert!(file.read_at(0, 4).is_err());
+    assert!(clone.info().is_err());
+    assert!(cursor.read(32).is_err());
+    assert!(cursor.refresh().is_err());
+    assert!(cwd.validate_as(&root, &actor).is_err());
+    assert!(root.application_account_as(&user, "/opt/app").is_err());
+}
+
+#[test]
+fn application_generation_prevents_quota_and_cache_aba() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.register_application_location_as(&user, "/opt/app", "/var/cache/app", ResourceKind::Cache, limits(8192, 32)).unwrap();
+    root.create_owned_file(&user, "/opt/app/image", b"kept", VirtualMode::new(0o600).unwrap()).unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    let handle = root.open_file_as(&actor, "/opt/app/image", FileMode::READ).unwrap();
+    root.resource_quota_as(&user, "/opt/app", limits(16384, 32)).unwrap();
+    root.resource_quota_as(&user, "/opt/app", limits(8192, 32)).unwrap();
+    assert!(root.read_file_as(&actor, "/opt/app/image", 32).is_err(), "quota ABA must not revive the old domain");
+    assert!(handle.read_at(0, 4).is_err());
+    let current = root.application_account_as(&user, "/opt/app").unwrap();
+    assert_eq!(root.read_file_as(&current, "/opt/app/image", 32).unwrap(), b"kept");
+    root.clear_cache_as(&user, "/var/cache/app").unwrap();
+    assert_eq!(root.resource_info_as(&user, "/var/cache/app").unwrap().0.state, ResourceState::Active);
+    assert!(root.read_file_as(&current, "/opt/app/image", 32).is_err(), "cache state ABA must not revive the old domain");
+    let catalog = root.load_access_catalog().unwrap();
+    let bytes = catalog.encode().unwrap();
+    assert!(bytes.starts_with(b"ELARA_ACCESS_CATALOG_V8
+"));
+    assert_eq!(super::super::access_model::AccessCatalog::decode(&bytes).unwrap(), catalog);
+    assert!(catalog.resources.values().all(|r| r.generation == 2));
+    let reopened = DataRoot::open(&path).unwrap();
+    assert_eq!(reopened.load_access_catalog().unwrap().encode().unwrap(), bytes);
+    let fresh = reopened.application_account_as(&user, "/opt/app").unwrap();
+    assert_eq!(reopened.read_file_as(&fresh, "/opt/app/image", 32).unwrap(), b"kept");
+}
+
+#[test]
+fn application_generation_refuses_overflow_without_publishing() {
+    let root = DataRoot::open(&fixture()).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    let original = root.load_access_catalog().unwrap();
+    let mut old = original.clone();
+    old.resources.values_mut().next().unwrap().generation = u64::MAX;
+    let mut new = old.clone();
+    new.resources.values_mut().next().unwrap().limits.bytes = 16384;
+    assert!(matches!(super::super::resource_model::advance_generations(&old, &mut new), Err(FsError::OwnershipIdentityExhausted)));
+    assert_eq!(root.load_access_catalog().unwrap(), original);
+}
+
+#[test]
+fn application_retained_handle_rejects_copied_resource_marker() {
+    let path = fixture();
+    let root = DataRoot::open(&path).unwrap();
+    let user = admin();
+    root.register_resource_as(&user, "/opt/app", ResourceKind::Application, limits(8192, 32)).unwrap();
+    root.create_owned_file(&user, "/opt/app/file", b"kept", VirtualMode::new(0o600).unwrap()).unwrap();
+    let actor = root.application_account_as(&user, "/opt/app").unwrap();
+    let file = root.open_file_as(&actor, "/opt/app/file", FileMode::READ).unwrap();
+    assert_eq!(file.read_at(0, 4).unwrap(), b"kept");
+    // Test fixture only: equal marker bytes on another object are not authority.
+    let marker = path.join("opt/app/.elara-dir-owner");
+    let bytes = std::fs::read(&marker).unwrap();
+    std::fs::rename(&marker, path.join("opt/app/original-marker")).unwrap();
+    std::fs::write(&marker, &bytes).unwrap();
+    assert!(file.read_at(0, 4).is_err(), "copied marker must not authorize retained IO");
+    assert_eq!(std::fs::read(path.join("opt/app/file")).unwrap(), b"kept");
+    assert_eq!(std::fs::read(path.join("opt/app/original-marker")).unwrap(), bytes);
+}

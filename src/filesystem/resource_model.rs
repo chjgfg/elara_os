@@ -59,6 +59,9 @@ pub(super) enum CreationResource {
 #[serde(deny_unknown_fields)]
 pub struct ResourceRecord {
     pub id: ResourceId,
+    /// Monotonic grant revision. Zero preserves legacy catalog bytes.
+    #[serde(default, skip_serializing_if = "generation_is_zero")]
+    pub generation: u64,
     pub path: String,
     pub owner: u32,
     pub kind: ResourceKind,
@@ -66,6 +69,21 @@ pub struct ResourceRecord {
     pub state: ResourceState,
     #[serde(default, skip_serializing_if = "ResourceAssociation::is_independent")]
     pub association: ResourceAssociation,
+}
+fn generation_is_zero(value: &u64) -> bool { *value == 0 }
+
+/// All policy/state changes go through the same namespace transaction boundary.
+/// File IO does not change grants; restoring old policy still advances its epoch.
+pub(super) fn advance_generations(old: &AccessCatalog, new: &mut AccessCatalog) -> Result<(), FsError> {
+    for (id, record) in &mut new.resources {
+        if let Some(previous) = old.resources.get(id) {
+            if record != previous {
+                record.generation = previous.generation.checked_add(1)
+                    .ok_or(FsError::OwnershipIdentityExhausted)?;
+            }
+        }
+    }
+    Ok(())
 }
 pub(super) fn within(path: &str, root: &str) -> bool {
     path == root

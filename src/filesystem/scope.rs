@@ -26,6 +26,7 @@ impl CreationOptions<'_> {
         if let Some(scope) = self.scope {
             if !Arc::ptr_eq(&root.family, &scope.0.root.family)
                 || scope.0.user.uid != user.uid
+                || !scope.0.user.same_execution_domain(user)
                 || root.load_access_catalog()?.tasks.get(&scope.id()) != Some(&user.uid)
             {
                 return Err(FsError::TaskScopeMismatch);

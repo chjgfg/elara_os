@@ -38,7 +38,7 @@ impl DataRoot {
         Ok(())
     }
     pub fn mount_info_as(&self, actor: &Account) -> Result<Vec<vfs::MountInfo>, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         Ok(self.vfs.mount_info()?)

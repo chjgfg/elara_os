@@ -946,3 +946,22 @@ main/doc-tests0项。原始输出结果行按ASCII字节及hex核对，输出无
 
 - bmmc1nowf最终证据：默认build25.09s、两次默认程序启动均exit0/stderr空，DEFAULT_JOINT_SHARED_MARKER_VALIDATED；全目标645 passed / 3 failed（420核心、186/189脚本、39/39其余），包括execution_cli22/22、fd_cli5/5通过。169个源码文件前后SHA-256均为e5038d19e11f8631d81423b876776fac27ab0d40aeabe306f01d48746499cca0。失败仍为job_tests下cancellation_prevents_later_effects_and_wait_reports_observed_cancellation、exit_cancels_and_joins_unfinished_jobs_instead_of_leaving_detached_work、cancellation_crosses_nested_sh_source_and_conditionals_without_running_traps；上版同环境两轮亦失败，保留问题，不提高阈值、不隐藏或跳过测试。627项仍是历史全绿基线。
 - 修订：上一条“FD负载下未收口”是bes6zemrr时点的判断；本批FD全过只能证明本批满足原门，不能证明所有负载下保证两秒。联合账本及固定标记协议按专项和真实程序证据独立保存，三个脚本时限、Windows目录同步、Linux原生及断电验收继续列为未完成。
+
+
+## 应用执行域（实现中，尚未完成安全验收）
+
+入口：[运行域](../src/filesystem/application.rs)、[前台入口](../src/script/application.rs)、[资源命令](../src/script/resources.rs)。
+
+- `app run APP EXECUTABLE [args...]`从已登记应用及关联cache/data生成运行域；应用内容只读，关联位置可写。根外、其他应用、未授权路径和管理员操作拒绝；祖先搜索不授予列表读取。域绑定当前DataRoot能力，不是宿主账号，也不是宿主进程沙箱。
+- 使用独立变量、函数、FD和作业表；子脚本继承域，退出先取消并join子作业再回收。当前只支持前台启动，后台`app run`明确拒绝，避免把未联动的取消路径伪装成可用。
+- 当前证据：全目标编译检查7.33s通过；b28fw8e7o核心5项9.02s、真实CLI2项11.70s通过（含新增域边界和真实应用运行）。扩展批bytfecj8s曾因测试误用Limits::default编译失败，已改显式容量；该失败批未执行负对照，后续负对照见下。新增原始文件句柄、克隆和legacy读句柄在namespace锁内验证域快照，内部卷持锁覆盖IO；bj2yz1qmm已通过：核心8项9.68s、真实CLI2项13.17s、脚本1项1.70s，0失败。随后补目录read/seek/refresh与cwd撤销门，应用句柄identity比较明确拒绝；bwv6c1zzw后续专项10核心12.33s、2CLI13.68s、1脚本1.70s通过。b7jopqi20摘除路径门、Host句柄绑定、目录绑定分别在目标断言失败，源码逐字节恢复。b1z787ktw严格Clippy发现句柄按值携带身份引起两个large_enum_variant错误，已从源头改为Arc共享；bsycyospg严格Clippy25.63s通过。自然EOF的EXIT trap改用独立Application边界，调用方join后清退任务；b3ftyd4kq 10核心20.93s、2CLI19.93s、1脚本3.35s通过；bulnno2w8资源代次回归27核心41.79s、2CLI22.47s、5脚本18.94s通过，配额改回与缓存回到Active均被持久代次挡住。新增 copied marker 物理绑定守卫和同UID跨应用上下文隔离测试。byr2t6lar应用全专项13核心18.93s通过（含copied marker和上下文隔离）；cwd重置到根上后同UID跨应用变量/函数不泄漏。严格Clippy bfna7dbxc 19.31s通过；完整回归bqibluh13实测657 passed / 3 failed / 660（见应用执行域末条），默认程序双进程见下条。
+- 未完成：打开对象撤销边界的完整验证、安装/更新事务、依赖管理、聚合配额、后台启动的取消联动。自动缓存驱逐、透明持久挂载、空间/IO总账、共享块快照、live overlay、透明块加密/全局去重及网络FS仍在原任务范围内。
+
+- 撤销语义待补：当前资源记录快照比较无法区分“配额变更后又恢复原值”或“缓存Evicting后恢复Active”的ABA；后续将用持久单调资源代次，不能把快照比较宣称为不可复活撤销。
+
+- 持久代次：资源记录新增 generation 字段，零值兼容V6/V7旧字节；首次变更升级V8，每次 commit_access_intent 统一推进，溢出返回 OwnershipIdentityExhausted 且不发布。pending 意图校验要求非零代次单调+1。配额改回原值、缓存Evicting后恢复Active不再复活旧身份。
+
+- 应用域切换重置cwd：prepare_identity 在应用域变化时将cwd设为新应用home，旧域的cwd pin不保留；同UID跨应用变量/函数/trap不泄漏。
+- bqibluh13完整回归（本轮源码）：all-targets --no-fail-fast 共 657 passed / 3 failed / 660。分解：429 核心、188/191 脚本、其余 40/40（main 0、default_acl_cli 2、execution_cli 23、fd_cli 5、filesystem_cli 1、host_boundary_cli 3、logging_cli 1、ownership_cli 1、script_cli 1、setgid_cli 1、sticky_cli 1、terminal_pty 1）。失败仍为 job_tests 三项既有 2 秒时限：cancellation_prevents_later_effects_and_wait_reports_observed_cancellation、exit_cancels_and_joins_unfinished_jobs_instead_of_leaving_detached_work、cancellation_crosses_nested_sh_source_and_conditionals_without_running_traps；未提高阈值、未跳过、未隐藏，且与 b8stugzd2 对旧版源码的对照复现一致。严格 Clippy bfna7dbxc 19.31s 通过。该批命令只包含 cargo test，未带内打印 SOURCE_BEFORE；以文件mtime交叉验证：输出结束于23:32:10，171个源码文件最大mtime为23:13:47，早于按各目标耗时（合计732.25s）反推的批次启动时刻约6分钟，可证明批次运行期间源码未被改动；随后默认程序验收批次b0c2yrkbx/bzqmt7vul前后指纹相同。657 通过不等于全绿，也不把三个时限失败改判为通过。
+- 默认程序双进程验收bzqmt7vul：默认`cargo build`成功（33.25s，在首跑批次完成；后续复跑命中缓存0.09s）；两个独立进程共用同一DataRoot。进程一`app register /opt/demo`、`app data /opt/demo /root/demo`，写入并chmod应用镜像后`app run`：父进程`PRIVATE=parent`未被继承，应用输出`APP_SMOKE:unset`、状态0，应用只写入关联data路径，父进程随后仍可写`/root/parent-data`。进程二重开DataRoot后`app locations`读到`ApplicationData`及`generation: 0`，`app uninstall`返回`ResourceRecovery { resources: 2, files: 2, directories: 2, deferred: 0 }`，应用目录与关联data均被移除，`.env`与根外哨兵字节不变。SOURCE_BEFORE与SOURCE_AFTER均为171文件a0f10b836eb22bcb17dae69e29691370c5168319889f259e729407a165f5b87a（169个src/tests Rust文件加Cargo.toml、Cargo.lock；较bmmc1nowf的169个多出两个应用模块）。
+- 验收夹具错误记录（非引擎缺陷）：首跑把应用镜像62字节登记在32字节配额下，写入按配额拒绝；第二、三跑因外层printf格式含`%s`无参和Python转义层把`\n`变成真实换行，分别得到`printf has unused arguments`与`script byte 7: unclosed quote`，重定向留下的未登记文件随后被chmod以Legacy ownership拒绝。最终改用4096字节配额和`chr(92)`字面换行后通过；未修改源码、阈值或产品路径。三次失败夹具目录保留在`target/test-data/app-default-*`，不写入项目根。

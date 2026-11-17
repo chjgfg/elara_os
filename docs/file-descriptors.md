@@ -57,13 +57,14 @@
 - 即使新用户复用原 root 的槽，原 `SLOT:GEN` 也拒绝；每条 fd 请求还检查 owner_uid 与实际 `Account.uid`。
 - 账户转换同时清空原账户脚本变量与函数。修改 `$USER` 不改变实际凭据。
 - Shell exit、EOF 或对象 drop 释放拥有的句柄，不删除用户数据；dup 的最后一个引用关闭后才释放文件对象。
+- `app run`使用新的FD表，不继承启动者的token；应用域绑定到实际文件/目录句柄，克隆保留绑定。域失效时读、写、元数据查询和目录read/refresh拒绝；应用句柄的`fd same`当前明确拒绝。普通非应用会话的原打开能力语义不变，验收进度见[应用执行域](filesystem.md#应用执行域实现中尚未完成安全验收)。
 - 打开句柄是已授权的能力。以后路径改名，不把旧名字当成新文件重新打开；能力的有效性由文件系统对象和表维护。
 
 ### 3.1 受管对象能力（2026-11-09）
 
 - 对象权限在打开时授权。chmod 只影响未来打开；已授予句柄保留打开时的元数据快照和能力，不用当前路径重授予。
 - rename 保持 ObjectId，句柄的 opened_path 保留旧名称。replace 保持 ObjectId、递增 storage_generation；普通 UserData 的旧句柄仍读写旧代，不会写进新代，删除名称也不撤销其已经打开的对象。
-- **应用/缓存资源另有持久生命周期约束**：每次写入、append、writeat、truncate 都在命名锁下按 ObjectId+generation 检查当前资源和配额；超额在字节和06000特权位改变前拒绝。资源处于 Removing/Evicting 返回 ResourceInactive；资源已退休或FD指向替换前旧代返回 ResourceDetached。旧FD仍可读取原打开对象，但不能以其继续消耗已释放资源的写入额度。该例外不改变普通 UserData 的旧代写入语义。
+- **应用/缓存资源另有持久生命周期约束**：每次写入、append、writeat、truncate 都在命名锁下按 ObjectId+generation 检查当前资源和配额；超额在字节和06000特权位改变前拒绝。资源处于 Removing/Evicting 返回 ResourceInactive；资源已退休或FD指向替换前旧代返回 ResourceDetached。非应用身份打开的旧FD仍可读取原打开对象，但不能以其继续消耗已释放资源的写入额度；应用身份打开的FD另受运行域撤销门约束。该例外不改变普通 UserData 的旧代写入语义。
 - cat、wc、输入重定向、流式来源、脚本文件、stat/find/du 和 glob 的受管读取使用账号入口；不能让普通用户经另一个命令绕开对象权限。
 - cp 的目标由发起者拥有（应用会话 umask），不克隆源所有者；mv 对受管普通文件调用归属事务。裸入口仍拒绝受管目录整体移动；账号目录 mv 经联合目录/文件 catalog 意图提交，不先改宿主目录留下失效归属。当前验收状态见[四项文件系统增量](filesystem.md#directory-access-task-2026-11-09)。
 - 多会话验证由 tests/fd_cli.rs 的 real_fd_ownership_modes_generations_and_legacy_guards_survive_multiple_sessions 覆盖，结果以文件系统单一账本为准。

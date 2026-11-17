@@ -34,6 +34,10 @@ impl std::error::Error for Denied {}
 
 /// Decide whether `user` may perform `access` on `path`.
 pub fn check(user: &Account, path: &VirtualPath, access: Access) -> Result<(), Denied> {
+    if let Some(domain) = user.application_domain() {
+        return if domain.permits(&path.to_string(), access, false) { Ok(()) }
+            else { Err(Denied { path: path.to_string(), access }) };
+    }
     if user.is_admin() {
         return Ok(());
     }
@@ -58,6 +62,15 @@ pub fn check(user: &Account, path: &VirtualPath, access: Access) -> Result<(), D
             }
         }
     }
+}
+
+/// Search through an ancestor does not grant listing or file reads.
+pub(crate) fn check_search(user: &Account, path: &VirtualPath) -> Result<(), Denied> {
+    if let Some(domain) = user.application_domain() {
+        return if domain.permits(&path.to_string(), Access::Read, true) { Ok(()) }
+            else { Err(Denied { path: path.to_string(), access: Access::Read }) };
+    }
+    check(user, path, Access::Read)
 }
 
 fn within(path: &str, prefix: &str) -> bool {

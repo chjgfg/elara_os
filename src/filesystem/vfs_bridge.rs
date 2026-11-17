@@ -28,6 +28,8 @@ impl WorkingDirectory {
     }
     pub(crate) fn validate_as(&self, root: &DataRoot, actor: &Account) -> Result<(), FsError> {
         if !self.belongs_to(root) { return Err(FsError::InvalidRoot); }
+        root.validate_application(actor)?;
+        super::ownership::user_path(actor, &self.path, Access::Read)?;
         match &self.backing {
             WorkingBacking::Host(anchor) => root.validate_host_anchor(actor, &self.path, anchor),
             WorkingBacking::Mounted(_) => Ok(()),
@@ -80,7 +82,7 @@ impl DataRoot {
         point: &str,
         credentials: &Credentials,
     ) -> Result<String, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let path = super::ownership::user_path(actor, point, Access::Write)?.to_string();
@@ -131,7 +133,7 @@ impl DataRoot {
         point: &str,
         image: &str,
     ) -> Result<(OwnedCommit, vfs::ImageStats), FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let Route::Mounted { volume, path, .. } = self.mounted(actor, point, Access::Read)? else {
@@ -156,7 +158,7 @@ impl DataRoot {
         image: &str,
         point: &str,
     ) -> Result<vfs::Recovery, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         if !matches!(self.vfs.route(image)?, Route::Host) {
@@ -178,7 +180,7 @@ impl DataRoot {
         limits: vfs::Limits,
     ) -> Result<(), FsError> {
         let credentials = self.credentials_as(actor)?;
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let volume = vfs::Volume::memory(
@@ -204,7 +206,7 @@ impl DataRoot {
         Ok(self.vfs.unmount(&self.credentials_as(actor)?, point)?)
     }
     pub fn mounts_as(&self, actor: &Account) -> Result<Vec<String>, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         Ok(self.vfs.mounts()?)
@@ -338,7 +340,7 @@ impl DataRoot {
         destination: &str,
         readonly: bool,
     ) -> Result<(), FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let credentials = self.credentials_as(actor)?;
@@ -359,7 +361,7 @@ impl DataRoot {
         destination: &str,
         whiteouts: &[String],
     ) -> Result<(), FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let Route::Mounted {

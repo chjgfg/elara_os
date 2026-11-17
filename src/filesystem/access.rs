@@ -194,6 +194,12 @@ impl Intent {
                 {
                     return Err(bad());
                 }
+                if old.generation != 0 || record.generation != 0 {
+                    let expected = if old == record { old.generation } else {
+                        old.generation.checked_add(1).ok_or_else(bad)?
+                    };
+                    if record.generation != expected { return Err(bad()); }
+                }
                 if old.state == super::ResourceState::Removing && record.state != old.state {
                     return Err(bad());
                 }
@@ -340,7 +346,9 @@ impl DataRoot {
     }
     pub fn credentials_as(&self, user: &Account) -> Result<Credentials, FsError> {
         let _guard = self.namespace_guard()?;
-        Ok(self.load_access_catalog()?.actor_credentials(user))
+        let catalog = self.load_access_catalog()?;
+        self.validate_application_locked(user, &catalog)?;
+        Ok(catalog.actor_credentials(user))
     }
     pub(super) fn authorize_file(
         &self,
@@ -602,7 +610,8 @@ impl DataRoot {
             return super::DirectoryCursor::virtual_directory(
                 volume.open_directory(&self.credentials_as(user)?, &path)?,
             )?
-            .with_namespace(self.vfs.clone(), mount);
+            .with_namespace(self.vfs.clone(), mount)?
+            .bind_application(self, user);
         }
         super::ownership::user_path(user, path, Access::Read)?;
         let _guard = self.namespace_guard()?;
@@ -615,7 +624,8 @@ impl DataRoot {
         }
         self.open_directory_unchecked(path)?
             .with_host_links(self, path, &_guard)?
-            .with_namespace(self.vfs.clone(), path.to_owned())
+            .with_namespace(self.vfs.clone(), path.to_owned())?
+            .bind_application(self, user)
     }
     pub fn create_directory_as(
         &self,
@@ -677,7 +687,7 @@ impl DataRoot {
             CreationAccess::Explicit(mode) | CreationAccess::Umask(mode) => (mode, Acl::default()),
         };
         let condition = if let Some((kind, limits, application)) = registration {
-            if user.uid != 0 || !super::resource_model::matches_path(kind, &path) {
+            if !user.is_admin() || !super::resource_model::matches_path(kind, &path) {
                 return Err(FsError::OwnershipDenied);
             }
             limits.validate()?;
@@ -704,6 +714,7 @@ impl DataRoot {
             };
             let resource = super::ResourceRecord {
                 id: super::ResourceId(id),
+                generation: 0,
                 path: path.clone(),
                 owner: user.uid,
                 kind,
@@ -998,9 +1009,10 @@ impl DataRoot {
     }
     fn commit_access_intent(
         &self,
-        intent: Intent,
+        mut intent: Intent,
         guard: &NamespaceGuard<'_>,
     ) -> Result<CommitReceipt, FsError> {
+        super::resource_model::advance_generations(&intent.old, &mut intent.new)?;
         let bytes = self.access_intent_bytes(&intent)?;
         // Check candidate names, not just the explicitly named source: moving
         // an ancestor and replacing a destination must both respect cwd leases.
@@ -1274,7 +1286,7 @@ impl DataRoot {
         Ok(receipt)
     }
     pub fn group_add_as(&self, user: &Account, gid: u32, name: &str) -> Result<(), FsError> {
-        if user.uid != 0 {
+        if !user.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let guard = self.namespace_guard()?;
@@ -1311,7 +1323,7 @@ impl DataRoot {
         uid: u32,
         present: bool,
     ) -> Result<(), FsError> {
-        if user.uid != 0 {
+        if !user.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let guard = self.namespace_guard()?;
@@ -1331,7 +1343,7 @@ impl DataRoot {
         Ok(())
     }
     pub fn primary_group_as(&self, user: &Account, uid: u32, gid: u32) -> Result<(), FsError> {
-        if user.uid != 0 {
+        if !user.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let guard = self.namespace_guard()?;

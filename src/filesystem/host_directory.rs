@@ -18,8 +18,13 @@ impl HostDirectoryView {
     }
     pub(super) fn snapshot(&self, directory: &Dir) -> Result<Vec<DirectoryEntry>, FsError> {
         let guard = self.root.namespace_guard()?;
+        self.snapshot_locked(&self.root, directory, &guard)
+    }
+    pub(super) fn snapshot_locked(&self, root: &DataRoot, directory: &Dir,
+        guard: &super::transaction::NamespaceGuard<'_>) -> Result<Vec<DirectoryEntry>, FsError> {
+        guard.require_root(root)?;
         let mut entries = super::directory::snapshot(directory)?;
-        self.project(&self.root, directory, &mut entries, &guard)?;
+        self.project(root, directory, &mut entries, guard)?;
         Ok(entries)
     }
     pub(super) fn project(

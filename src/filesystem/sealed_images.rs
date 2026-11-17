@@ -5,7 +5,7 @@ use std::{io::Read, matches};
 use zeroize::Zeroizing;
 impl DataRoot {
     fn sealed_path(&self, actor: &Account, path: &str) -> Result<String, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let path = super::ownership_model::key(path)?;

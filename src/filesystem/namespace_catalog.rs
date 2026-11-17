@@ -250,7 +250,7 @@ impl DataRoot {
     /// Root-only, idempotent upgrade. Host directory-sync limitations still apply;
     /// this does not promise power-loss durability on an unsupported host.
     pub fn upgrade_catalog_as(&self, actor: &Account) -> Result<CatalogUpgrade, FsError> {
-        if actor.uid != 0 {
+        if !actor.is_admin() {
             return Err(FsError::OwnershipDenied);
         }
         let guard = self.namespace_guard()?;

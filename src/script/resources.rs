@@ -9,6 +9,7 @@ use std::io::Write;
 use std::writeln;
 const HELP: &str =
     "app register PATH BYTES OBJECTS (new /opt or /srv directory, administrator only)
+app run APP EXECUTABLE [args...] (isolated foreground interpreter domain)
 app list | app stat PATH | app quota PATH BYTES OBJECTS | app uninstall PATH
 app cache APP PATH BYTES OBJECTS | app data APP PATH BYTES OBJECTS
 app locations APP (registered cache/data locations; uninstall freezes and removes the group)
@@ -25,6 +26,9 @@ pub(super) fn execute(
     name: &str,
     args: &[String],
 ) -> Result<CommandOutput, String> {
+    if name == "app" && args.first().is_some_and(|arg| arg == "run") {
+        return super::application::run(root, user, cwd, &args[1..]);
+    }
     let kind = if name == "app" {
         ResourceKind::Application
     } else {

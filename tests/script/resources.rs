@@ -101,3 +101,47 @@ fn resources_commands_associate_locations_and_uninstall_the_group() {
     assert!(root.resources_as(&user).unwrap().is_empty());
     assert!(!root.root().join("root/group").exists());
 }
+
+#[test]
+fn application_same_uid_cannot_reuse_parent_module_resources() {
+    use elara_os::{filesystem::{CreationOptions, ResourceKind, ResourceLimits}, logging::Logger,
+        script::{modules::{ModuleCommands, Request}, shared::{Resources, SharedModules}}};
+    use std::sync::Arc;
+    let (root, user) = fixture();
+    let quota = ResourceLimits { bytes: 8192, objects: 16 };
+    root.register_resource_as(&user, "/opt/a", ResourceKind::Application, quota).unwrap();
+    root.register_resource_as(&user, "/opt/b", ResourceKind::Application, quota).unwrap();
+    let a = root.application_account_as(&user, "/opt/a").unwrap();
+    let b = root.application_account_as(&user, "/opt/b").unwrap();
+    assert_eq!(a.uid, b.uid);
+    let resources = Resources::new(user.uid, Arc::new(Logger::open(&root).unwrap()), 16).unwrap();
+    let cwd = VirtualPath::root();
+    let request = || Request { creation: CreationOptions::default(), name: "fd", args: &[], stdin: &[], cwd: &cwd };
+    let mut parent = SharedModules::new(&root, &user, &resources);
+    assert!(parent.execute_as(&a, request()).is_err());
+    let mut mislabeled = SharedModules::new(&root, &a, &resources);
+    assert!(mislabeled.execute(request()).is_err());
+    assert!(mislabeled.execute_as(&b, request()).is_err());
+}
+
+#[test]
+fn application_same_uid_context_switch_drops_variables_functions_and_traps() {
+    use elara_os::filesystem::{ResourceKind, ResourceLimits};
+    let (root, user) = fixture();
+    let quota = ResourceLimits { bytes: 8192, objects: 16 };
+    root.register_resource_as(&user, "/opt/a", ResourceKind::Application, quota).unwrap();
+    root.register_resource_as(&user, "/opt/b", ResourceKind::Application, quota).unwrap();
+    let a = root.application_account_as(&user, "/opt/a").unwrap();
+    let b = root.application_account_as(&user, "/opt/b").unwrap();
+    let mut context = Context::new(VirtualPath::strict("/opt/a").unwrap());
+    let first = run(&root, &a, &mut context, &["-c".into(), "PRIVATE=hidden; f() { echo inherited; }".into()]).unwrap();
+    assert_eq!(first.status, 0, "{first:?}");
+    // Switching to a different application domain resets the context: the old
+    // variable and function must not survive into the second domain.
+    context.prepare_identity(&b);
+    let second = run(&root, &b, &mut context, &["-c".into(), "echo ${PRIVATE-unset}; f".into()]).unwrap();
+    let out = String::from_utf8_lossy(&second.stdout);
+    assert!(out.contains("unset"), "variable leaked across domains: {out}");
+    assert!(second.status != 0 || !String::from_utf8_lossy(&second.stderr).is_empty(),
+        "function leaked across domains: {second:?}");
+}

@@ -78,6 +78,7 @@ Windows 路径的权限比较同时覆盖大小写别名，例如 `/ROOT`、`/VA
 | `app quota PATH BYTES OBJECTS` | 改配额；低于当前用量拒绝；既有FD下一次写也受新配额约束 |
 | `app cache APP PATH BYTES OBJECTS` / `app data APP PATH BYTES OBJECTS` | 为已登记应用原子创建关联缓存/数据目录；数据位置限home用户子目录或root子目录，仍由管理员拥有和控制 |
 | `app locations APP` | 列出该应用绑定的缓存/数据资源位置、ID和配额 |
+| `app run APP EXECUTABLE [args...]` | 前台运行受管虚拟脚本；以应用目录解析相对程序路径，不继承父变量/函数/FD；程序目录只读、关联data/cache可写，退出取消并等待子作业；应用域专项通过，完整边界验收状态见filesystem账本 |
 | `app uninstall PATH` | 一次持久事务冻结应用及所有关联位置，再先子后父逐项回收；未知或被替换对象保留，整组支持重启续办 |
 | `cache register PATH BYTES OBJECTS` | 在 `/var/cache` 下新建并持久登记缓存资源根 |
 | `cache list` / `cache stat PATH` / `cache quota PATH BYTES OBJECTS` | 列表、用量及配额，语义与应用资源一致 |

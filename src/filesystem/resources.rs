@@ -22,7 +22,7 @@ pub struct ResourceRecovery {
     pub deferred: usize,
 }
 fn admin(actor: &Account) -> Result<(), FsError> {
-    if actor.uid == 0 {
+    if actor.is_admin() {
         Ok(())
     } else {
         Err(FsError::OwnershipDenied)

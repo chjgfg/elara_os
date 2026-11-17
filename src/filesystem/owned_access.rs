@@ -292,7 +292,7 @@ impl DataRoot {
                 share,
                 options.umask,
             )?;
-            return Ok(super::OpenFile::new_virtual(file, mode, path.to_owned()));
+            return super::OpenFile::new_virtual(file, mode, path.to_owned()).bind_application(self, user);
         }
         if let super::vfs::Route::Mounted {
             volume,
@@ -316,7 +316,7 @@ impl DataRoot {
                 share,
                 options.umask,
             )?;
-            return Ok(super::OpenFile::new_virtual(file, mode, path.to_owned()));
+            return super::OpenFile::new_virtual(file, mode, path.to_owned()).bind_application(self, user);
         }
         // Existing file opens grant capabilities, not a new lifecycle record.
         // New-file creation below always requires condition(), including /run.
@@ -380,7 +380,7 @@ impl DataRoot {
                         return Err(super::vfs::Error::Unsupported.into());
                     }
                     let file = self.dir.open_with(relative, &existing_options(mode))?;
-                    return Ok(super::OpenFile::new(file, mode, path.to_owned()));
+                    return super::OpenFile::new(file, mode, path.to_owned()).bind_application(self, user);
                 }
                 Err(FsError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                     if mode.creation() == super::FileCreation::Existing {
@@ -452,7 +452,7 @@ impl DataRoot {
             id,
             file: Some(lease_file),
         };
-        Ok(super::OpenFile::new_owned(file, mode, info, lease))
+        super::OpenFile::new_owned(file, mode, info, lease).bind_application(self, user)
     }
 
     pub fn chmod_as(
